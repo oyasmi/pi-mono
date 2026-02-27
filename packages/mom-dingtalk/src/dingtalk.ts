@@ -173,6 +173,12 @@ export class DingTalkBot {
 				log.logWarning("DingTalk: failed to parse message", err instanceof Error ? err.message : String(err));
 			}
 
+			// ACK the message to prevent 60-second server-side retry.
+			// The SDK's onCallback only emits the event but does NOT send an ACK
+			// back to the server automatically (unlike onEvent). Without this,
+			// the server will re-deliver the same message after ~60 seconds.
+			client.socketCallBackResponse(msg.headers.messageId, { status: "SUCCESS", message: "OK" });
+
 			return { status: "SUCCESS" as const, message: "OK" };
 		});
 
