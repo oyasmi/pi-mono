@@ -38,7 +38,8 @@ function loadConfig(): DingTalkAppConfig {
 		console.error(`    "clientSecret": "your-app-secret",`);
 		console.error(`    "robotCode": "your-robot-code",`);
 		console.error(`    "cardTemplateId": "your-card-template-id",`);
-		console.error(`    "cardTemplateKey": "content"`);
+		console.error(`    "cardTemplateKey": "content",`);
+		console.error(`    "allowFrom": ["user-id-1"]`);
 		console.error(`  }`);
 		console.error(`  EOF`);
 		process.exit(1);

@@ -21,6 +21,7 @@ export interface DingTalkConfig {
 	robotCode?: string;
 	cardTemplateId?: string;
 	cardTemplateKey?: string;
+	allowFrom?: string[];
 }
 
 export interface DingTalkEvent {
@@ -449,6 +450,13 @@ export class DingTalkBot {
 		if (!content) {
 			log.logWarning("DingTalk: empty message received");
 			return;
+		}
+
+		if (this.config.allowFrom && this.config.allowFrom.length > 0) {
+			if (!this.config.allowFrom.includes(senderId)) {
+				log.logWarning(`DingTalk: ignoring message from unauthorized user ${senderName} (${senderId})`);
+				return;
+			}
 		}
 
 		// Determine channel ID

@@ -33,7 +33,8 @@ cat > ~/.pi/mom-dingtalk/config.json << 'EOF'
   "clientSecret": "your-app-secret",
   "robotCode": "your-robot-code",
   "cardTemplateId": "your-card-template-id",
-  "cardTemplateKey": "content"
+  "cardTemplateKey": "content",
+  "allowFrom": ["your-staff-id"]
 }
 EOF
 ```
@@ -73,6 +74,7 @@ mom-dingtalk --sandbox=docker:my-container ./workspace
 | `robotCode` | 可选 | 机器人编码（默认使用 clientId）|
 | `cardTemplateId` | 推荐 | AI 卡片模板 ID（不设置则不使用 AI Card）|
 | `cardTemplateKey` | 可选 | 卡片模板变量名（默认 `content`）|
+| `allowFrom` | 可选 | 允许使用的用户ID（staffId）列表。如果不配置或为空列表，则允许所有人使用 |
 
 ### SOUL.md / AGENT.md / MEMORY.md
 
