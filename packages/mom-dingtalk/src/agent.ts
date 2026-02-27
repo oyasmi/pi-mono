@@ -4,11 +4,10 @@ import {
 	AgentSession,
 	AuthStorage,
 	convertToLlm,
-	createExtensionRuntime,
+	DefaultResourceLoader,
 	formatSkillsForPrompt,
 	loadSkillsFromDir,
 	ModelRegistry,
-	type ResourceLoader,
 	SessionManager,
 	type Skill,
 } from "@mariozechner/pi-coding-agent";
@@ -398,6 +397,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	const executor = createExecutor(sandboxConfig);
 	const workspacePath = executor.getWorkspacePath(channelDir.replace(`/${channelId}`, ""));
 	const workspaceDir = join(channelDir, "..");
+	const momAgentDir = join(homedir(), ".pi", "mom-dingtalk");
 
 	// Create tools
 	const tools = createMomTools(executor);
@@ -415,8 +415,8 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	const settingsManager = new MomSettingsManager(workspaceDir);
 
 	// Create AuthStorage and ModelRegistry
-	const authStorage = AuthStorage.create(join(homedir(), ".pi", "mom-dingtalk", "auth.json"));
-	const modelRegistry = new ModelRegistry(authStorage);
+	const authStorage = AuthStorage.create(join(momAgentDir, "auth.json"));
+	const modelRegistry = new ModelRegistry(authStorage, join(momAgentDir, "models.json"));
 
 	// Resolve model: prefer available custom models, fall back to default
 	const availableModels = modelRegistry.getAvailable();
@@ -448,18 +448,16 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
 	}
 
-	const resourceLoader: ResourceLoader = {
-		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
-		getSkills: () => ({ skills: [], diagnostics: [] }),
-		getPrompts: () => ({ prompts: [], diagnostics: [] }),
-		getThemes: () => ({ themes: [], diagnostics: [] }),
-		getAgentsFiles: () => ({ agentsFiles: [] }),
-		getSystemPrompt: () => systemPrompt,
-		getAppendSystemPrompt: () => [],
-		getPathMetadata: () => new Map(),
-		extendResources: () => {},
-		reload: async () => {},
-	};
+	const resourceLoader = new DefaultResourceLoader({
+		cwd: process.cwd(),
+		agentDir: momAgentDir,
+		settingsManager: settingsManager as any,
+		skillsOverride: (base) => {
+			// Append workspace & channel skills
+			base.skills.push(...skills);
+			return base;
+		},
+	});
 
 	const baseToolsOverride = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
 
@@ -605,6 +603,9 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		async run(ctx: DingTalkContext, _store: ChannelStore): Promise<{ stopReason: string; errorMessage?: string }> {
 			// Ensure channel directory exists
 			await mkdir(channelDir, { recursive: true });
+
+			// Reload resources before doing anything
+			await resourceLoader.reload();
 
 			// Sync messages from log.jsonl
 			const syncedCount = syncLogToSessionManager(sessionManager, channelDir, ctx.message.ts);
