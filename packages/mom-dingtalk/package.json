@@ -1,0 +1,51 @@
+{
+    "name": "@anthropic-ai/pi-mom-dingtalk",
+    "version": "0.1.0",
+    "description": "DingTalk bot that delegates messages to the pi coding agent via AI Cards",
+    "type": "module",
+    "bin": {
+        "mom-dingtalk": "dist/main.js"
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "files": [
+        "dist",
+        "CHANGELOG.md"
+    ],
+    "scripts": {
+        "clean": "rm -rf dist",
+        "build": "tsgo -p tsconfig.build.json && chmod +x dist/main.js",
+        "dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+        "prepublishOnly": "npm run clean && npm run build"
+    },
+    "dependencies": {
+        "@mariozechner/pi-agent-core": "^0.55.1",
+        "@mariozechner/pi-ai": "^0.55.1",
+        "@mariozechner/pi-coding-agent": "^0.55.1",
+        "@sinclair/typebox": "^0.34.0",
+        "chalk": "^5.6.2",
+        "croner": "^9.1.0",
+        "diff": "^8.0.2",
+        "dingtalk-stream": "^2.1.4"
+    },
+    "devDependencies": {
+        "@types/diff": "^7.0.2",
+        "@types/node": "^24.3.0",
+        "typescript": "^5.7.3"
+    },
+    "keywords": [
+        "dingtalk",
+        "bot",
+        "ai",
+        "agent"
+    ],
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/badlogic/pi-mono.git",
+        "directory": "packages/mom-dingtalk"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    }
+}
