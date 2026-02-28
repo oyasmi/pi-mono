@@ -446,15 +446,38 @@ export class DingTalkBot {
 	// Private - Message handling
 	// ==========================================================================
 
+	private extractContent(data: RobotMessage): string {
+		// 1. text 类型消息：从 text.content 提取
+		const textContent = (data.text?.content || "").trim();
+		if (textContent) return textContent;
+
+		// 2. richText 类型消息：从 content.richText 列表提取文本片段
+		// TS SDK 没有 richText 类型定义，需要绕过类型系统
+		// 实际 JSON 结构: { msgtype: "richText", content: { richText: [{ text: "..." }, ...] } }
+		const raw = data as unknown as Record<string, unknown>;
+		const contentObj = raw.content as { richText?: Array<Record<string, string>> } | undefined;
+		if (contentObj?.richText) {
+			const parts: string[] = [];
+			for (const item of contentObj.richText) {
+				if (item.text) parts.push(item.text);
+			}
+			const joined = parts.join("").trim();
+			if (joined) return joined;
+		}
+
+		return "";
+	}
+
 	private async onStreamMessage(data: RobotMessage): Promise<void> {
-		const content = (data.text?.content || "").trim();
+		const content = this.extractContent(data);
 		const senderId = data.senderStaffId || data.senderId || "";
 		const senderName = data.senderNick || "Unknown";
 		const conversationId = data.conversationId || "";
 		const conversationType = data.conversationType || "1";
 
 		if (!content) {
-			log.logWarning("DingTalk: empty message received");
+			const msgtype = (data as unknown as Record<string, unknown>).msgtype || "unknown";
+			log.logWarning(`DingTalk: empty message (type=${msgtype})`);
 			return;
 		}
 
