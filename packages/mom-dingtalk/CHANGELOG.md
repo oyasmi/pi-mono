@@ -21,3 +21,6 @@
 - DingTalk reconnection logic auto-retries with exponential backoff on failure
 - Message dedup uses `Set` with FIFO eviction instead of `O(n)` array scan
 - Replaced inline `await import("axios")` with top-level import
+- Refactored DingTalk delivery into an explicit progress/final lifecycle so AI Cards only show process output and final answers are sent as standalone Markdown messages
+- Final answer emission now keys off agent turn completion instead of every assistant `message_end`, avoiding intermediate assistant text being sent as the final reply
+- Conversation metadata is persisted per channel so scheduled events and proactive sends continue to work after process restarts

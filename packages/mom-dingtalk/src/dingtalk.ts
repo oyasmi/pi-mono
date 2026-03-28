@@ -7,10 +7,10 @@
  * - Access token management
  * - Per-channel message queuing
  */
-
 import axios from "axios";
 import { DWClient, type DWClientDownStream, type RobotMessage, TOPIC_ROBOT } from "dingtalk-stream";
-
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { dirname, join } from "path";
 import * as log from "./log.js";
 
 // ============================================================================
@@ -24,6 +24,7 @@ export interface DingTalkConfig {
 	cardTemplateId?: string;
 	cardTemplateKey?: string;
 	allowFrom?: string[];
+	stateDir?: string;
 }
 
 export interface DingTalkEvent {
@@ -54,6 +55,8 @@ export interface DingTalkContext {
 	setTyping: (isTyping: boolean) => Promise<void>;
 	setWorking: (working: boolean) => Promise<void>;
 	deleteMessage: () => Promise<void>;
+	flush: () => Promise<void>;
+	close: () => Promise<void>;
 }
 
 export interface DingTalkHandler {
@@ -75,6 +78,12 @@ interface AICard {
 	lastUpdated: number;
 	content: string;
 	finished: boolean;
+}
+
+interface ConversationMeta {
+	conversationId: string;
+	conversationType: string;
+	senderId: string;
 }
 
 // ============================================================================
@@ -133,7 +142,7 @@ export class DingTalkBot {
 	private activeCards = new Map<string, AICard>();
 
 	// Conversation metadata cache: channelId → metadata
-	private convMeta = new Map<string, { conversationId: string; conversationType: string; senderId: string }>();
+	private convMeta = new Map<string, ConversationMeta>();
 
 	// Per-channel queues
 	private queues = new Map<string, ChannelQueue>();
@@ -375,7 +384,11 @@ export class DingTalkBot {
 	 * Stream content to the active AI Card for a channel.
 	 */
 	async streamToCard(channelId: string, content: string, finalize: boolean = false): Promise<boolean> {
-		const card = this.activeCards.get(channelId);
+		let card = this.activeCards.get(channelId);
+		if ((!card || card.finished) && !finalize && this.config.cardTemplateId && content.trim()) {
+			await this.ensureCard(channelId);
+			card = this.activeCards.get(channelId);
+		}
 		if (!card || card.finished) {
 			if (finalize) {
 				await this.sendPlain(channelId, content);
@@ -390,7 +403,11 @@ export class DingTalkBot {
 	 * Returns true if a card was finalized, false if no active card existed.
 	 */
 	async finalizeExistingCard(channelId: string, content: string): Promise<boolean> {
-		const card = this.activeCards.get(channelId);
+		let card = this.activeCards.get(channelId);
+		if ((!card || card.finished) && this.config.cardTemplateId && content.trim()) {
+			await this.ensureCard(channelId);
+			card = this.activeCards.get(channelId);
+		}
 		if (!card || card.finished) {
 			return false;
 		}
@@ -410,6 +427,10 @@ export class DingTalkBot {
 		}
 	}
 
+	discardCard(channelId: string): void {
+		this.activeCards.delete(channelId);
+	}
+
 	/**
 	 * Send a normal message natively mapping DM and Group to correct endpoints (fallback when no card).
 	 */
@@ -417,7 +438,7 @@ export class DingTalkBot {
 		const token = await this.getAccessToken();
 		if (!token) return;
 
-		const meta = this.convMeta.get(channelId);
+		const meta = this.getConversationMeta(channelId);
 		if (!meta) {
 			log.logWarning(`No conversation metadata for ${channelId}, cannot send plain message`);
 			return;
@@ -471,7 +492,7 @@ export class DingTalkBot {
 		const token = await this.getAccessToken();
 		if (!token) return null;
 
-		const meta = this.convMeta.get(channelId);
+		const meta = this.getConversationMeta(channelId);
 		if (!meta) {
 			log.logWarning(`No conversation metadata for ${channelId}, cannot create card`);
 			return null;
@@ -676,19 +697,11 @@ export class DingTalkBot {
 		log.logInfo(`DingTalk ← ${senderName} (${senderId}) [${channelId}]: ${content.substring(0, 80)}`);
 
 		// Cache conversation metadata for card creation
-		this.convMeta.set(channelId, {
+		this.setConversationMeta(channelId, {
 			conversationId,
 			conversationType,
 			senderId,
 		});
-
-		// Pre-create AI card if configured
-		if (this.config.cardTemplateId) {
-			const existing = this.activeCards.get(channelId);
-			if (!existing || existing.finished) {
-				await this.createCard(channelId);
-			}
-		}
 
 		// Build event
 		const event: DingTalkEvent = {
@@ -736,5 +749,58 @@ export class DingTalkBot {
 			this.queues.set(channelId, queue);
 		}
 		return queue;
+	}
+
+	private getConversationMeta(channelId: string): ConversationMeta | null {
+		const cached = this.convMeta.get(channelId);
+		if (cached) return cached;
+
+		const metaPath = this.getConversationMetaPath(channelId);
+		if (!metaPath || !existsSync(metaPath)) {
+			return null;
+		}
+
+		try {
+			const parsed = JSON.parse(readFileSync(metaPath, "utf-8")) as Partial<ConversationMeta>;
+			if (!parsed.conversationId || !parsed.conversationType || !parsed.senderId) {
+				return null;
+			}
+
+			const meta: ConversationMeta = {
+				conversationId: parsed.conversationId,
+				conversationType: parsed.conversationType,
+				senderId: parsed.senderId,
+			};
+			this.convMeta.set(channelId, meta);
+			return meta;
+		} catch (err) {
+			log.logWarning(
+				`Failed to load conversation metadata for ${channelId}`,
+				err instanceof Error ? err.message : String(err),
+			);
+			return null;
+		}
+	}
+
+	private setConversationMeta(channelId: string, meta: ConversationMeta): void {
+		this.convMeta.set(channelId, meta);
+
+		const metaPath = this.getConversationMetaPath(channelId);
+		if (!metaPath) return;
+
+		try {
+			mkdirSync(dirname(metaPath), { recursive: true });
+			writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf-8");
+		} catch (err) {
+			log.logWarning(
+				`Failed to persist conversation metadata for ${channelId}`,
+				err instanceof Error ? err.message : String(err),
+			);
+		}
+	}
+
+	private getConversationMetaPath(channelId: string): string | null {
+		if (!this.config.stateDir) return null;
+		return join(this.config.stateDir, channelId, ".channel-meta.json");
 	}
 }

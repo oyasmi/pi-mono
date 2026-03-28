@@ -504,6 +504,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		},
 		stopReason: "stop",
 		errorMessage: undefined as string | undefined,
+		finalResponseQueued: false,
 	};
 
 	// Subscribe to events ONCE
@@ -574,11 +575,14 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				const content = agentEvent.message.content;
 				const thinkingParts: string[] = [];
 				const textParts: string[] = [];
+				let hasToolCalls = false;
 				for (const part of content) {
 					if (part.type === "thinking") {
 						thinkingParts.push((part as any).thinking);
 					} else if (part.type === "text") {
 						textParts.push((part as any).text);
+					} else if (part.type === "toolCall") {
+						hasToolCalls = true;
 					}
 				}
 
@@ -586,14 +590,34 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 				for (const thinking of thinkingParts) {
 					log.logThinking(logCtx, thinking);
-					// Stream thinking to AI Card
 					queue.enqueue(() => ctx.respond(`_💭 ${thinking}_`, false), "thinking");
 				}
 
-				if (text.trim()) {
-					log.logResponse(logCtx, text);
-					// Send final response as Plain Markdown (instantly)
-					queue.enqueue(() => ctx.respondPlain(text), "final response");
+				if (hasToolCalls && text.trim()) {
+					queue.enqueue(() => ctx.respond(text, false), "assistant progress");
+				}
+			}
+		} else if (event.type === "turn_end") {
+			const turnEvent = event as any & {
+				type: "turn_end";
+				message: { role: string; stopReason?: string; content: Array<{ type: string; text?: string }> };
+				toolResults: unknown[];
+			};
+			if (turnEvent.message.role === "assistant" && turnEvent.toolResults.length === 0) {
+				if (turnEvent.message.stopReason === "error" || turnEvent.message.stopReason === "aborted") {
+					return;
+				}
+
+				const finalContent = turnEvent.message.content as Array<{ type: string; text?: string }>;
+				const finalText = finalContent
+					.filter((part): part is { type: "text"; text: string } => part.type === "text" && !!part.text)
+					.map((part) => part.text)
+					.join("\n");
+
+				if (finalText.trim() && finalText.trim() !== "[SILENT]" && !finalText.trim().startsWith("[SILENT]")) {
+					runState.finalResponseQueued = true;
+					log.logResponse(logCtx, finalText);
+					queue.enqueue(() => ctx.respondPlain(finalText), "final response");
 				}
 			}
 		} else if (event.type === "auto_compaction_start") {
@@ -670,6 +694,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			};
 			runState.stopReason = "stop";
 			runState.errorMessage = undefined;
+			runState.finalResponseQueued = false;
 
 			// Create queue for this run
 			let queueChain = Promise.resolve();
@@ -720,41 +745,46 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			// Wait for queued messages
 			await queueChain;
 
-			// Handle error case
-			if (runState.stopReason === "error" && runState.errorMessage) {
-				try {
-					await ctx.replaceMessage("_Sorry, something went wrong_");
-				} catch (err) {
-					const errMsg = err instanceof Error ? err.message : String(err);
-					log.logWarning("Failed to post error message", errMsg);
-				}
-			} else {
-				// Final message update
-				const messages = session.messages;
-				const lastAssistant = messages.filter((m: any) => m.role === "assistant").pop() as any;
-				const finalText =
-					lastAssistant?.content
-						?.filter((c: any): c is { type: "text"; text: string } => c.type === "text")
-						?.map((c: any) => c.text)
-						?.join("\n") || "";
+			try {
+				// Handle error case
+				if (runState.stopReason === "error" && runState.errorMessage && !runState.finalResponseQueued) {
+					try {
+						await ctx.replaceMessage("_Sorry, something went wrong_");
+					} catch (err) {
+						const errMsg = err instanceof Error ? err.message : String(err);
+						log.logWarning("Failed to post error message", errMsg);
+					}
+				} else {
+					// Final message update
+					const messages = session.messages;
+					const lastAssistant = messages.filter((m: any) => m.role === "assistant").pop() as any;
+					const finalText =
+						lastAssistant?.content
+							?.filter((c: any): c is { type: "text"; text: string } => c.type === "text")
+							?.map((c: any) => c.text)
+							?.join("\n") || "";
 
-				// Check for [SILENT] marker
-				if (finalText.trim() === "[SILENT]" || finalText.trim().startsWith("[SILENT]")) {
-					try {
-						await ctx.deleteMessage();
-						log.logInfo("Silent response - deleted message");
-					} catch (err) {
-						const errMsg = err instanceof Error ? err.message : String(err);
-						log.logWarning("Failed to delete message for silent response", errMsg);
-					}
-				} else if (finalText.trim()) {
-					try {
-						await ctx.replaceMessage(finalText);
-					} catch (err) {
-						const errMsg = err instanceof Error ? err.message : String(err);
-						log.logWarning("Failed to replace message with final text", errMsg);
+					if (finalText.trim() === "[SILENT]" || finalText.trim().startsWith("[SILENT]")) {
+						try {
+							await ctx.deleteMessage();
+							log.logInfo("Silent response - deleted message");
+						} catch (err) {
+							const errMsg = err instanceof Error ? err.message : String(err);
+							log.logWarning("Failed to delete message for silent response", errMsg);
+						}
+					} else if (finalText.trim() && !runState.finalResponseQueued) {
+						try {
+							await ctx.replaceMessage(finalText);
+						} catch (err) {
+							const errMsg = err instanceof Error ? err.message : String(err);
+							log.logWarning("Failed to replace message with final text", errMsg);
+						}
 					}
 				}
+
+				await ctx.flush();
+			} finally {
+				await ctx.close();
 			}
 
 			// Log usage summary

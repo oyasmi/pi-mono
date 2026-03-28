@@ -5,11 +5,11 @@
 ## 功能
 
 - **钉钉 Stream 模式** — 通过 `dingtalk-stream` SDK（DWClient）接收消息，自动重连
-- **AI Card 流式输出** — 实时流式更新 AI 卡片，无 Card 模板时自动降级为普通消息
+- **AI Card 流式输出** — 过程性思考/执行信息通过 AI 卡片流式展示，最终答案通过普通 Markdown 消息快速返回
 - **多租户隔离** — 每个用户 DM / 群聊独立工作空间（`dm_{staffId}` / `group_{conversationId}`）
 - **配置文件驱动** — Agent 行为通过 `SOUL.md`、`AGENT.md`、`MEMORY.md` 配置
 - **技能系统** — 支持全局和频道级 Skill 扩展
-- **定时事件** — 支持 immediate / one-shot / periodic 定时任务
+- **定时事件** — 支持 immediate / one-shot / periodic 定时任务，并持久化会话元数据以支持重启后的主动发送
 - **沙箱执行** — 支持 Host 直接执行和 Docker 容器隔离
 - **多模型支持** — 通过 `models.json` 配置自定义 LLM 提供商和模型
 
@@ -66,6 +66,12 @@ mom-dingtalk --sandbox=docker:my-container
 
 工作目录固定为 `~/.pi/mom-dingtalk/workspace/`，首次运行时自动创建默认配置文件。
 
+## 消息交互模型
+
+- **过程消息** — Tool 调用、重试、压缩上下文、思考说明等过程性信息写入 AI Card
+- **最终答案** — 最终答复单独以 Markdown 消息发送，避免等待 AI Card 流式收尾
+- **无过程输出时** — 不会创建 AI Card，直接发送最终消息
+
 ## 配置文件
 
 ### config.json
@@ -99,6 +105,7 @@ API 密钥配置，格式为 `{ "provider": "key" }`。也可通过环境变量�
 └── dm_{userId}/         # 用户工作空间（群聊为 group_{conversationId}）
     ├── AGENT.md         # 频道级行为指令（与全局层叠）
     ├── MEMORY.md        # 频道级记忆
+    ├── .channel-meta.json # 会话寻址元数据（用于主动发送与重启恢复）
     ├── context.jsonl    # LLM 上下文（结构化消息）
     ├── log.jsonl        # 消息历史（人类可读）
     └── skills/          # 频道级技能
@@ -129,6 +136,11 @@ API 密钥配置，格式为 `{ "provider": "key" }`。也可通过环境变量�
   "timezone": "Asia/Shanghai"
 }
 ```
+
+说明：
+
+- 定时事件会向 `channelId` 指定的既有会话发送消息
+- 首次收到真实钉钉消息后，会保存该会话的寻址元数据；之后即使 bot 重启，事件仍可继续向该会话主动发送消息
 
 ## 环境变量
 

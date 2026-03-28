@@ -4,13 +4,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { type AgentRunner, getOrCreateRunner } from "./agent.js";
-import {
-	DingTalkBot,
-	type DingTalkConfig,
-	type DingTalkContext,
-	type DingTalkEvent,
-	type DingTalkHandler,
-} from "./dingtalk.js";
+import { createDingTalkContext } from "./delivery.js";
+import { DingTalkBot, type DingTalkConfig, type DingTalkEvent, type DingTalkHandler } from "./dingtalk.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
@@ -201,6 +196,7 @@ await initializeWorkspace(workingDir);
 
 // Load DingTalk config from file
 const dingtalkConfig = loadConfig();
+dingtalkConfig.stateDir = workingDir;
 
 await validateSandbox(sandbox);
 
@@ -233,137 +229,6 @@ function getState(channelId: string): ChannelState {
 }
 
 // ============================================================================
-// Create DingTalkContext adapter
-// ============================================================================
-
-function createDingTalkContext(
-	event: DingTalkEvent,
-	bot: DingTalkBot,
-	state: ChannelState,
-	_isEvent?: boolean,
-): DingTalkContext {
-	let accumulatedText = "";
-	let lastSentTime = 0;
-	let updateInProgress = false;
-	let pendingUpdate = false;
-	let isFinalized = false;
-	let finalizeFallsBackToPlain = true;
-
-	const MIN_UPDATE_INTERVAL = 800; // ms between DingTalk API calls
-
-	const triggerUpdate = async (options?: { finalize?: boolean; fallbackToPlain?: boolean }) => {
-		if (options?.finalize) {
-			isFinalized = true;
-			finalizeFallsBackToPlain = options.fallbackToPlain ?? true;
-		}
-
-		// If a request is already running, just record that we need to update again later.
-		if (updateInProgress) {
-			pendingUpdate = true;
-			return;
-		}
-
-		const now = Date.now();
-		const timeSinceLast = now - lastSentTime;
-
-		// Throttling: if it's too soon for a regular update, schedule one.
-		// Finalization (isFinalized) always proceeds or is picked up by the next run.
-		if (!isFinalized && timeSinceLast < MIN_UPDATE_INTERVAL) {
-			if (!pendingUpdate) {
-				pendingUpdate = true;
-				const delay = MIN_UPDATE_INTERVAL - timeSinceLast;
-				setTimeout(() => triggerUpdate(), delay);
-			}
-			return;
-		}
-
-		updateInProgress = true;
-		pendingUpdate = false;
-		lastSentTime = Date.now();
-
-		try {
-			// Always send the latest accumulated text.
-			// If isFinalized was set (even by a parallel call that set the flag), we use finalizeCard.
-			if (isFinalized) {
-				if (finalizeFallsBackToPlain) {
-					await bot.finalizeCard(event.channelId, accumulatedText);
-				} else {
-					await bot.finalizeExistingCard(event.channelId, accumulatedText);
-				}
-			} else {
-				await bot.streamToCard(event.channelId, accumulatedText);
-			}
-		} catch (err) {
-			log.logWarning(`[${event.channelId}] Card update failed`, String(err));
-		} finally {
-			updateInProgress = false;
-			// CRITICAL FIX: If more text arrived OR finalization was requested while we were busy,
-			// trigger the next update immediately.
-			if (pendingUpdate) {
-				triggerUpdate();
-			}
-		}
-	};
-
-	return {
-		message: {
-			text: event.text,
-			rawText: event.text,
-			user: event.user,
-			userName: event.userName,
-			channel: event.channelId,
-			ts: event.ts,
-		},
-		channelName: event.channelId,
-
-		respond: async (text: string, shouldLog = true) => {
-			if (isFinalized) return;
-			accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
-
-			if (shouldLog) {
-				state.store.logBotResponse(event.channelId, text, Date.now().toString());
-			}
-
-			// For ordinary respond, we use the Card
-			triggerUpdate().catch(() => {});
-		},
-
-		respondPlain: async (text: string, shouldLog = true) => {
-			if (isFinalized) return;
-
-			if (shouldLog) {
-				state.store.logBotResponse(event.channelId, text, Date.now().toString());
-			}
-
-			// For Plain respond, we send direct markdown message
-			// and then finalize the existing card with process-only content.
-			await bot.sendPlain(event.channelId, text);
-			await triggerUpdate({ finalize: true, fallbackToPlain: false });
-		},
-
-		replaceMessage: async (text: string) => {
-			if (isFinalized) {
-				return;
-			}
-			accumulatedText = text;
-			await triggerUpdate({ finalize: true, fallbackToPlain: true });
-		},
-
-		respondInThread: async (text: string) => {
-			log.logInfo(`[thread] ${text.substring(0, 200)}`);
-		},
-
-		setTyping: async (_isTyping: boolean) => {},
-
-		setWorking: async (_working: boolean) => {},
-
-		deleteMessage: async () => {
-			isFinalized = true;
-		},
-	};
-}
-
-// ============================================================================
 // Handler
 // ============================================================================
 
@@ -382,7 +247,7 @@ const handler: DingTalkHandler = {
 		}
 	},
 
-	async handleEvent(event: DingTalkEvent, bot: DingTalkBot, isEvent?: boolean): Promise<void> {
+	async handleEvent(event: DingTalkEvent, bot: DingTalkBot, _isEvent?: boolean): Promise<void> {
 		const state = getState(event.channelId);
 
 		state.running = true;
@@ -401,7 +266,7 @@ const handler: DingTalkHandler = {
 		log.logInfo(`[${event.channelId}] Starting run: ${event.text.substring(0, 50)}`);
 
 		try {
-			const ctx = createDingTalkContext(event, bot, state, isEvent);
+			const ctx = createDingTalkContext(event, bot, state.store);
 
 			const result = await state.runner.run(ctx, state.store);
 
