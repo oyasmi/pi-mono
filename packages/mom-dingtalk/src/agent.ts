@@ -1,5 +1,5 @@
 import { Agent } from "@mariozechner/pi-agent-core";
-import { getModel } from "@mariozechner/pi-ai";
+import { type Api, getModel, type Model } from "@mariozechner/pi-ai";
 import {
 	AgentSession,
 	AuthStorage,
@@ -14,7 +14,8 @@ import {
 import { existsSync, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
-import { join } from "path";
+import { basename, join } from "path";
+import { type BuiltInCommand, renderBuiltInHelp } from "./commands.js";
 import { MomSettingsManager, syncLogToSessionManager } from "./context.js";
 import type { DingTalkContext } from "./dingtalk.js";
 import * as log from "./log.js";
@@ -27,6 +28,7 @@ const defaultModel = getModel("anthropic", "claude-sonnet-4-5");
 
 export interface AgentRunner {
 	run(ctx: DingTalkContext, store: ChannelStore): Promise<{ stopReason: string; errorMessage?: string }>;
+	handleBuiltinCommand(ctx: DingTalkContext, command: BuiltInCommand): Promise<void>;
 	abort(): void;
 }
 
@@ -42,6 +44,78 @@ function isFinalOutcome(outcome: FinalOutcome): outcome is { kind: "final"; text
 
 function getFinalOutcomeText(outcome: FinalOutcome): string | null {
 	return isFinalOutcome(outcome) ? outcome.text : null;
+}
+
+function formatModelReference(model: Model<Api>): string {
+	return `${model.provider}/${model.id}`;
+}
+
+function findExactModelReferenceMatch(
+	modelReference: string,
+	availableModels: Model<Api>[],
+): { match?: Model<Api>; ambiguous: boolean } {
+	const trimmedReference = modelReference.trim();
+	if (!trimmedReference) {
+		return { ambiguous: false };
+	}
+
+	const normalizedReference = trimmedReference.toLowerCase();
+
+	const canonicalMatches = availableModels.filter(
+		(model) => `${model.provider}/${model.id}`.toLowerCase() === normalizedReference,
+	);
+	if (canonicalMatches.length === 1) {
+		return { match: canonicalMatches[0], ambiguous: false };
+	}
+	if (canonicalMatches.length > 1) {
+		return { ambiguous: true };
+	}
+
+	const slashIndex = trimmedReference.indexOf("/");
+	if (slashIndex !== -1) {
+		const provider = trimmedReference.substring(0, slashIndex).trim();
+		const modelId = trimmedReference.substring(slashIndex + 1).trim();
+		if (provider && modelId) {
+			const providerMatches = availableModels.filter(
+				(model) =>
+					model.provider.toLowerCase() === provider.toLowerCase() &&
+					model.id.toLowerCase() === modelId.toLowerCase(),
+			);
+			if (providerMatches.length === 1) {
+				return { match: providerMatches[0], ambiguous: false };
+			}
+			if (providerMatches.length > 1) {
+				return { ambiguous: true };
+			}
+		}
+	}
+
+	const idMatches = availableModels.filter((model) => model.id.toLowerCase() === normalizedReference);
+	if (idMatches.length === 1) {
+		return { match: idMatches[0], ambiguous: false };
+	}
+
+	return { ambiguous: idMatches.length > 1 };
+}
+
+function formatModelList(models: Model<Api>[], currentModel: Model<Api> | undefined, limit: number = 20): string {
+	const refs = models
+		.slice()
+		.sort((a, b) => formatModelReference(a).localeCompare(formatModelReference(b)))
+		.map((model) => {
+			const ref = formatModelReference(model);
+			const marker =
+				currentModel && currentModel.provider === model.provider && currentModel.id === model.id
+					? " (current)"
+					: "";
+			return `- \`${ref}\`${marker}`;
+		});
+
+	if (refs.length <= limit) {
+		return refs.join("\n");
+	}
+
+	return `${refs.slice(0, limit).join("\n")}\n- ... and ${refs.length - limit} more`;
 }
 
 async function getApiKeyForModel(modelRegistry: ModelRegistry, model: any): Promise<string> {
@@ -457,25 +531,25 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 	// Resolve model: prefer available custom models, fall back to default
 	const availableModels = modelRegistry.getAvailable();
-	let model: any;
+	let activeModel: Model<Api>;
 	if (availableModels.length > 0) {
-		model = availableModels[0];
-		log.logInfo(`Using model: ${model.provider}/${model.id} (${model.name})`);
+		activeModel = availableModels[0];
+		log.logInfo(`Using model: ${activeModel.provider}/${activeModel.id} (${activeModel.name})`);
 	} else {
-		model = defaultModel;
-		log.logInfo(`Using default model: ${model.provider}/${model.id}`);
+		activeModel = defaultModel;
+		log.logInfo(`Using default model: ${activeModel.provider}/${activeModel.id}`);
 	}
 
 	// Create agent
 	const agent = new Agent({
 		initialState: {
 			systemPrompt,
-			model,
+			model: activeModel,
 			thinkingLevel: "off",
 			tools,
 		},
 		convertToLlm,
-		getApiKey: async () => getApiKeyForModel(modelRegistry, model),
+		getApiKey: async () => getApiKeyForModel(modelRegistry, activeModel),
 	});
 
 	// Load existing messages
@@ -547,6 +621,131 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		errorMessage: undefined as string | undefined,
 		finalOutcome: { kind: "none" },
 		finalResponseDelivered: false,
+	};
+
+	const sendCommandReply = async (ctx: DingTalkContext, text: string): Promise<void> => {
+		const delivered = await ctx.respondPlain(text);
+		if (!delivered) {
+			await ctx.replaceMessage(text);
+			await ctx.flush();
+		}
+	};
+
+	const handleModelBuiltinCommand = async (ctx: DingTalkContext, args: string): Promise<void> => {
+		modelRegistry.refresh();
+		const availableModels = await modelRegistry.getAvailable();
+		const currentModel = session.model;
+
+		if (!args.trim()) {
+			const current = currentModel ? `\`${formatModelReference(currentModel)}\`` : "(none)";
+			const available = availableModels.length > 0 ? formatModelList(availableModels, currentModel) : "- (none)";
+			await sendCommandReply(
+				ctx,
+				`# Model
+
+Current model: ${current}
+
+Use \`/model <provider/modelId>\` or \`/model <modelId>\` to switch. Bare model IDs must resolve uniquely.
+
+Available models:
+${available}`,
+			);
+			return;
+		}
+
+		const match = findExactModelReferenceMatch(args, availableModels);
+		if (match.match) {
+			await session.setModel(match.match);
+			activeModel = match.match;
+			await sendCommandReply(ctx, `已切换模型到 \`${formatModelReference(match.match)}\`。`);
+			return;
+		}
+
+		const available = availableModels.length > 0 ? formatModelList(availableModels, currentModel, 10) : "- (none)";
+		if (match.ambiguous) {
+			await sendCommandReply(
+				ctx,
+				`未切换模型：\`${args.trim()}\` 匹配到多个模型。请改用精确的 \`provider/modelId\` 形式。
+
+Available models:
+${available}`,
+			);
+			return;
+		}
+
+		await sendCommandReply(
+			ctx,
+			`未找到模型 \`${args.trim()}\`。请使用精确的 \`provider/modelId\` 或唯一的 \`modelId\`。
+
+Available models:
+${available}`,
+		);
+	};
+
+	const handleBuiltInCommand = async (ctx: DingTalkContext, command: BuiltInCommand): Promise<void> => {
+		try {
+			switch (command.name) {
+				case "help":
+					await sendCommandReply(ctx, renderBuiltInHelp());
+					return;
+				case "new": {
+					const completed = await session.newSession();
+					await sendCommandReply(
+						ctx,
+						completed
+							? `已开启新会话。
+
+Session ID: \`${session.sessionId}\``
+							: "新会话已取消。",
+					);
+					return;
+				}
+				case "compact": {
+					const result = await session.compact(command.args || undefined);
+					await sendCommandReply(
+						ctx,
+						`已压缩当前会话上下文。
+
+- Tokens before compaction: \`${result.tokensBefore}\`
+- Summary:
+
+\`\`\`text
+${result.summary}
+\`\`\``,
+					);
+					return;
+				}
+				case "session": {
+					const stats = session.getSessionStats();
+					const currentModel = session.model ? `\`${formatModelReference(session.model)}\`` : "(none)";
+					const sessionFile = stats.sessionFile ? `\`${basename(stats.sessionFile)}\`` : "(none)";
+					await sendCommandReply(
+						ctx,
+						`# Session
+
+- Session ID: \`${stats.sessionId}\`
+- Session file: ${sessionFile}
+- Model: ${currentModel}
+- Thinking level: \`${session.thinkingLevel}\`
+- User messages: \`${stats.userMessages}\`
+- Assistant messages: \`${stats.assistantMessages}\`
+- Tool calls: \`${stats.toolCalls}\`
+- Tool results: \`${stats.toolResults}\`
+- Total messages: \`${stats.totalMessages}\`
+- Tokens: \`${stats.tokens.total}\` (input \`${stats.tokens.input}\`, output \`${stats.tokens.output}\`, cache read \`${stats.tokens.cacheRead}\`, cache write \`${stats.tokens.cacheWrite}\`)
+- Cost: \`$${stats.cost.toFixed(4)}\``,
+					);
+					return;
+				}
+				case "model":
+					await handleModelBuiltinCommand(ctx, command.args);
+					return;
+			}
+		} catch (err) {
+			const errMsg = err instanceof Error ? err.message : String(err);
+			log.logWarning(`[${channelId}] Built-in command failed`, errMsg);
+			await sendCommandReply(ctx, `命令执行失败：${errMsg}`);
+		}
 	};
 
 	// Subscribe to events ONCE
@@ -700,6 +899,10 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	});
 
 	return {
+		async handleBuiltinCommand(ctx: DingTalkContext, command: BuiltInCommand): Promise<void> {
+			await handleBuiltInCommand(ctx, command);
+		},
+
 		async run(ctx: DingTalkContext, _store: ChannelStore): Promise<{ stopReason: string; errorMessage?: string }> {
 			// Reset per-run state
 			runState.ctx = ctx;
@@ -854,7 +1057,8 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 							lastAssistantMessage.usage.cacheRead +
 							lastAssistantMessage.usage.cacheWrite
 						: 0;
-					const contextWindow = model.contextWindow || 200000;
+					const currentRunModel = session.model ?? activeModel;
+					const contextWindow = currentRunModel.contextWindow || 200000;
 
 					log.logUsageSummary(runState.logCtx!, runState.totalUsage, contextTokens, contextWindow);
 				}

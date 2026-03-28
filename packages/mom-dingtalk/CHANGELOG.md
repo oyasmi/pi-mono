@@ -9,6 +9,7 @@
 - MEMORY.md size warning (> 5000 chars prompts Agent to consolidate)
 - log.jsonl rotation (> 1MB archived to .1)
 - Periodic memory consolidation event template in README
+- DingTalk channel now intercepts `/help`, `/new`, `/compact`, `/session`, and `/model` as built-in slash commands instead of sending them to the LLM
 
 ### Changed
 

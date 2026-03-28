@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { type AgentRunner, getOrCreateRunner } from "./agent.js";
+import { parseBuiltInCommand } from "./commands.js";
 import { createDingTalkContext } from "./delivery.js";
 import { DingTalkBot, type DingTalkConfig, type DingTalkEvent, type DingTalkHandler } from "./dingtalk.js";
 import { createEventsWatcher } from "./events.js";
@@ -263,11 +264,17 @@ const handler: DingTalkHandler = {
 			isBot: false,
 		});
 
-		log.logInfo(`[${event.channelId}] Starting run: ${event.text.substring(0, 50)}`);
-
 		try {
 			const ctx = createDingTalkContext(event, bot, state.store);
+			const builtInCommand = parseBuiltInCommand(event.text);
 
+			if (builtInCommand) {
+				log.logInfo(`[${event.channelId}] Executing command: ${builtInCommand.rawText}`);
+				await state.runner.handleBuiltinCommand(ctx, builtInCommand);
+				return;
+			}
+
+			log.logInfo(`[${event.channelId}] Starting run: ${event.text.substring(0, 50)}`);
 			const result = await state.runner.run(ctx, state.store);
 
 			if (result.stopReason === "aborted" && state.stopRequested) {

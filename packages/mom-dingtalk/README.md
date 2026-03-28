@@ -6,6 +6,7 @@
 
 - **钉钉 Stream 模式** — 通过 `dingtalk-stream` SDK（DWClient）接收消息，自动重连
 - **AI Card 流式输出** — 过程性思考/执行信息通过 AI 卡片流式展示，最终答案通过普通 Markdown 消息快速返回
+- **内置 Slash 命令** — 钉钉渠道直接支持 `/help`、`/new`、`/compact`、`/session`、`/model`
 - **多租户隔离** — 每个用户 DM / 群聊独立工作空间（`dm_{staffId}` / `group_{conversationId}`）
 - **配置文件驱动** — Agent 行为通过 `SOUL.md`、`AGENT.md`、`MEMORY.md` 配置
 - **技能系统** — 支持全局和频道级 Skill 扩展
@@ -71,6 +72,22 @@ mom-dingtalk --sandbox=docker:my-container
 - **过程消息** — Tool 调用、重试、压缩上下文、思考说明等过程性信息写入 AI Card
 - **最终答案** — 最终答复单独以 Markdown 消息发送，避免等待 AI Card 流式收尾
 - **无过程输出时** — 不会创建 AI Card，直接发送最终消息
+
+## 内置 Slash 命令
+
+以下命令由 `mom-dingtalk` 渠道直接处理，不会作为普通 prompt 发送给模型：
+
+- `/help` — 返回钉钉渠道支持的命令说明和示例
+- `/new` — 开启一个新会话
+- `/compact [instructions]` — 手动压缩当前会话上下文
+- `/session` — 查看当前会话状态、消息统计、token 和成本
+- `/model [provider/modelId|modelId]` — 查看当前模型，或按精确匹配切换模型
+
+说明：
+
+- `/model` 无参数时返回当前模型和可用模型列表
+- `/model <ref>` 只支持精确匹配；建议优先使用 `provider/modelId`
+- 其他 slash 输入不会被 `mom-dingtalk` 拦截，仍会走 `AgentSession.prompt()` 的原有逻辑，例如 extension command、prompt template、`/skill:...`
 
 ## 配置文件
 
