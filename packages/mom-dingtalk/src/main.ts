@@ -17,6 +17,21 @@ import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.
 import { ChannelStore } from "./store.js";
 
 // ============================================================================
+// Global Network Setup
+// ============================================================================
+
+// Clear system-wide proxy settings at the process level to ensure Node's native fetch
+// and other libraries (like axios) don't try to use an unreachable proxy.
+if (process.env.DINGTALK_FORCE_PROXY !== "true") {
+	delete process.env.http_proxy;
+	delete process.env.https_proxy;
+	delete process.env.all_proxy;
+	delete process.env.HTTP_PROXY;
+	delete process.env.HTTPS_PROXY;
+	delete process.env.ALL_PROXY;
+}
+
+// ============================================================================
 // Config
 // ============================================================================
 
@@ -228,8 +243,67 @@ function createDingTalkContext(
 	_isEvent?: boolean,
 ): DingTalkContext {
 	let accumulatedText = "";
-	let updatePromise = Promise.resolve();
+	let lastSentTime = 0;
+	let updateInProgress = false;
+	let pendingUpdate = false;
 	let isFinalized = false;
+	let finalizeFallsBackToPlain = true;
+
+	const MIN_UPDATE_INTERVAL = 800; // ms between DingTalk API calls
+
+	const triggerUpdate = async (options?: { finalize?: boolean; fallbackToPlain?: boolean }) => {
+		if (options?.finalize) {
+			isFinalized = true;
+			finalizeFallsBackToPlain = options.fallbackToPlain ?? true;
+		}
+
+		// If a request is already running, just record that we need to update again later.
+		if (updateInProgress) {
+			pendingUpdate = true;
+			return;
+		}
+
+		const now = Date.now();
+		const timeSinceLast = now - lastSentTime;
+
+		// Throttling: if it's too soon for a regular update, schedule one.
+		// Finalization (isFinalized) always proceeds or is picked up by the next run.
+		if (!isFinalized && timeSinceLast < MIN_UPDATE_INTERVAL) {
+			if (!pendingUpdate) {
+				pendingUpdate = true;
+				const delay = MIN_UPDATE_INTERVAL - timeSinceLast;
+				setTimeout(() => triggerUpdate(), delay);
+			}
+			return;
+		}
+
+		updateInProgress = true;
+		pendingUpdate = false;
+		lastSentTime = Date.now();
+
+		try {
+			// Always send the latest accumulated text.
+			// If isFinalized was set (even by a parallel call that set the flag), we use finalizeCard.
+			if (isFinalized) {
+				if (finalizeFallsBackToPlain) {
+					await bot.finalizeCard(event.channelId, accumulatedText);
+				} else {
+					await bot.finalizeExistingCard(event.channelId, accumulatedText);
+				}
+			} else {
+				await bot.streamToCard(event.channelId, accumulatedText);
+			}
+		} catch (err) {
+			log.logWarning(`[${event.channelId}] Card update failed`, String(err));
+		} finally {
+			updateInProgress = false;
+			// CRITICAL FIX: If more text arrived OR finalization was requested while we were busy,
+			// trigger the next update immediately.
+			if (pendingUpdate) {
+				triggerUpdate();
+			}
+		}
+	};
 
 	return {
 		message: {
@@ -243,49 +317,48 @@ function createDingTalkContext(
 		channelName: event.channelId,
 
 		respond: async (text: string, shouldLog = true) => {
-			updatePromise = updatePromise.then(async () => {
-				if (isFinalized) return;
-				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
-				// Stream update to AI Card
-				await bot.streamToCard(event.channelId, accumulatedText);
+			if (isFinalized) return;
+			accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
 
-				if (shouldLog) {
-					state.store.logBotResponse(event.channelId, text, Date.now().toString());
-				}
-			});
-			await updatePromise;
+			if (shouldLog) {
+				state.store.logBotResponse(event.channelId, text, Date.now().toString());
+			}
+
+			// For ordinary respond, we use the Card
+			triggerUpdate().catch(() => {});
+		},
+
+		respondPlain: async (text: string, shouldLog = true) => {
+			if (isFinalized) return;
+
+			if (shouldLog) {
+				state.store.logBotResponse(event.channelId, text, Date.now().toString());
+			}
+
+			// For Plain respond, we send direct markdown message
+			// and then finalize the existing card with process-only content.
+			await bot.sendPlain(event.channelId, text);
+			await triggerUpdate({ finalize: true, fallbackToPlain: false });
 		},
 
 		replaceMessage: async (text: string) => {
-			updatePromise = updatePromise.then(async () => {
-				if (isFinalized) return;
-				accumulatedText = text;
-				isFinalized = true;
-				// Finalize the AI Card with final content
-				await bot.finalizeCard(event.channelId, text);
-			});
-			await updatePromise;
+			if (isFinalized) {
+				return;
+			}
+			accumulatedText = text;
+			await triggerUpdate({ finalize: true, fallbackToPlain: true });
 		},
 
 		respondInThread: async (text: string) => {
-			// DingTalk doesn't have threads — log as console output only
 			log.logInfo(`[thread] ${text.substring(0, 200)}`);
 		},
 
-		setTyping: async (_isTyping: boolean) => {
-			// DingTalk AI Card handles this
-		},
+		setTyping: async (_isTyping: boolean) => {},
 
-		setWorking: async (_working: boolean) => {
-			// No-op for DingTalk — the AI Card shows streaming state
-		},
+		setWorking: async (_working: boolean) => {},
 
 		deleteMessage: async () => {
-			// DingTalk cards can't be deleted — just finalize empty
-			updatePromise = updatePromise.then(async () => {
-				isFinalized = true;
-			});
-			await updatePromise;
+			isFinalized = true;
 		},
 	};
 }

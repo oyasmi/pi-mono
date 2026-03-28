@@ -586,11 +586,14 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 				for (const thinking of thinkingParts) {
 					log.logThinking(logCtx, thinking);
+					// Stream thinking to AI Card
+					queue.enqueue(() => ctx.respond(`_💭 ${thinking}_`, false), "thinking");
 				}
 
 				if (text.trim()) {
 					log.logResponse(logCtx, text);
-					queue.enqueueMessage(text, "main", "response main");
+					// Send final response as Plain Markdown (instantly)
+					queue.enqueue(() => ctx.respondPlain(text), "final response");
 				}
 			}
 		} else if (event.type === "auto_compaction_start") {

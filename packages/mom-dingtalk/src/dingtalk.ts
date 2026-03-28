@@ -10,6 +10,7 @@
 
 import axios from "axios";
 import { DWClient, type DWClientDownStream, type RobotMessage, TOPIC_ROBOT } from "dingtalk-stream";
+
 import * as log from "./log.js";
 
 // ============================================================================
@@ -47,6 +48,7 @@ export interface DingTalkContext {
 	};
 	channelName?: string;
 	respond: (text: string, shouldLog?: boolean) => Promise<void>;
+	respondPlain: (text: string, shouldLog?: boolean) => Promise<void>;
 	replaceMessage: (text: string) => Promise<void>;
 	respondInThread: (text: string) => Promise<void>;
 	setTyping: (isTyping: boolean) => Promise<void>;
@@ -184,8 +186,7 @@ export class DingTalkBot {
 
 		log.logInfo(`DingTalk: initializing stream (clientId=${this.config.clientId.substring(0, 8)}…)`);
 
-		const shouldDisableProxy = process.env.DINGTALK_FORCE_PROXY !== "true";
-		if (shouldDisableProxy && axios.defaults) {
+		if (process.env.DINGTALK_FORCE_PROXY !== "true") {
 			axios.defaults.proxy = false;
 		}
 
@@ -385,14 +386,26 @@ export class DingTalkBot {
 	}
 
 	/**
+	 * Finalize the active card for a channel without falling back to a plain message.
+	 * Returns true if a card was finalized, false if no active card existed.
+	 */
+	async finalizeExistingCard(channelId: string, content: string): Promise<boolean> {
+		const card = this.activeCards.get(channelId);
+		if (!card || card.finished) {
+			return false;
+		}
+
+		await this.streamCard(card, content, true);
+		this.activeCards.delete(channelId);
+		return true;
+	}
+
+	/**
 	 * Finalize and remove the active card for a channel.
 	 */
 	async finalizeCard(channelId: string, content: string): Promise<void> {
-		const card = this.activeCards.get(channelId);
-		if (card && !card.finished) {
-			await this.streamCard(card, content, true);
-			this.activeCards.delete(channelId);
-		} else {
+		const finalized = await this.finalizeExistingCard(channelId, content);
+		if (!finalized) {
 			await this.sendPlain(channelId, content);
 		}
 	}
@@ -435,21 +448,18 @@ export class DingTalkBot {
 		}
 
 		try {
-			const resp = await fetch(url, {
-				method: "POST",
+			await axios.post(url, body, {
 				headers: {
 					"x-acs-dingtalk-access-token": token,
 					"Content-Type": "application/json",
 				},
-				body: JSON.stringify(body),
 			});
-
-			if (!resp.ok) {
-				const respBody = await resp.text();
-				log.logWarning(`DingTalk plain send failed (${resp.status})`, respBody);
-			}
 		} catch (err) {
-			log.logWarning("DingTalk plain send error", err instanceof Error ? err.message : String(err));
+			if (axios.isAxiosError(err) && err.response) {
+				log.logWarning(`DingTalk plain send failed (${err.response.status})`, JSON.stringify(err.response.data));
+			} else {
+				log.logWarning("DingTalk plain send error", err instanceof Error ? err.message : String(err));
+			}
 		}
 	}
 
@@ -496,22 +506,18 @@ export class DingTalkBot {
 		}
 
 		try {
-			const resp = await fetch(`${DINGTALK_API}/v1.0/card/instances/createAndDeliver`, {
-				method: "POST",
+			await axios.post(`${DINGTALK_API}/v1.0/card/instances/createAndDeliver`, body, {
 				headers: {
 					"x-acs-dingtalk-access-token": token,
 					"Content-Type": "application/json",
 				},
-				body: JSON.stringify(body),
 			});
-
-			if (!resp.ok) {
-				const respBody = await resp.text();
-				log.logWarning(`DingTalk Card: create failed (${resp.status})`, respBody);
-				return null;
-			}
 		} catch (err) {
-			log.logWarning("DingTalk Card: create failed", err instanceof Error ? err.message : String(err));
+			if (axios.isAxiosError(err) && err.response) {
+				log.logWarning(`DingTalk Card: create failed (${err.response.status})`, JSON.stringify(err.response.data));
+			} else {
+				log.logWarning("DingTalk Card: create failed", err instanceof Error ? err.message : String(err));
+			}
 			return null;
 		}
 
@@ -549,20 +555,18 @@ export class DingTalkBot {
 			isError: false,
 		};
 
+		const start = Date.now();
 		try {
-			const resp = await fetch(`${DINGTALK_API}/v1.0/card/streaming`, {
-				method: "PUT",
+			await axios.put(`${DINGTALK_API}/v1.0/card/streaming`, body, {
 				headers: {
 					"x-acs-dingtalk-access-token": card.accessToken,
 					"Content-Type": "application/json",
 				},
-				body: JSON.stringify(body),
 			});
 
-			if (!resp.ok) {
-				const respBody = await resp.text();
-				log.logWarning(`DingTalk Card: streaming failed (${resp.status})`, respBody);
-				return false;
+			const duration = Date.now() - start;
+			if (duration > 1000) {
+				log.logWarning(`DingTalk Card: streaming request took ${duration}ms (slow)`);
 			}
 
 			card.lastUpdated = Date.now() / 1000;
@@ -572,7 +576,14 @@ export class DingTalkBot {
 			}
 			return true;
 		} catch (err) {
-			log.logWarning("DingTalk Card: streaming failed", err instanceof Error ? err.message : String(err));
+			if (axios.isAxiosError(err) && err.response) {
+				log.logWarning(
+					`DingTalk Card: streaming failed (${err.response.status})`,
+					JSON.stringify(err.response.data),
+				);
+			} else {
+				log.logWarning("DingTalk Card: streaming failed", err instanceof Error ? err.message : String(err));
+			}
 			return false;
 		}
 	}
@@ -587,27 +598,30 @@ export class DingTalkBot {
 		}
 
 		try {
-			const resp = await fetch(`${DINGTALK_API}/v1.0/oauth2/accessToken`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
+			const resp = await axios.post(
+				`${DINGTALK_API}/v1.0/oauth2/accessToken`,
+				{
 					appKey: this.config.clientId,
 					appSecret: this.config.clientSecret,
-				}),
-			});
+				},
+				{
+					headers: { "Content-Type": "application/json" },
+				},
+			);
 
-			if (!resp.ok) {
-				const body = await resp.text();
-				log.logWarning(`DingTalk: failed to get access token (${resp.status})`, body);
-				return null;
-			}
-
-			const data = (await resp.json()) as { accessToken?: string; expireIn?: number };
+			const data = resp.data as { accessToken?: string; expireIn?: number };
 			this.accessToken = data.accessToken || null;
 			this.tokenExpiry = Date.now() / 1000 + (data.expireIn || 7200) - 60;
 			return this.accessToken;
 		} catch (err) {
-			log.logWarning("DingTalk: failed to get access token", err instanceof Error ? err.message : String(err));
+			if (axios.isAxiosError(err) && err.response) {
+				log.logWarning(
+					`DingTalk: failed to get access token (${err.response.status})`,
+					JSON.stringify(err.response.data),
+				);
+			} else {
+				log.logWarning("DingTalk: failed to get access token", err instanceof Error ? err.message : String(err));
+			}
 			return null;
 		}
 	}
