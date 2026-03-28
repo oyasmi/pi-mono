@@ -135,6 +135,18 @@ export class DingTalkBot {
 	// Per-channel queues
 	private queues = new Map<string, ChannelQueue>();
 
+	// Connection stability
+	private client: DWClient | null = null;
+	private lastSocketAvailableTime = Date.now();
+	private activeMessageProcessing = false;
+	private keepAliveTimer: NodeJS.Timeout | null = null;
+	private isReconnecting = false;
+	private isStopped = false;
+	private reconnectAttempts = 0;
+
+	// Deduplication cache
+	private processedMessageIds: string[] = [];
+
 	constructor(handler: DingTalkHandler, config: DingTalkConfig) {
 		this.handler = handler;
 		this.config = config;
@@ -156,36 +168,157 @@ export class DingTalkBot {
 
 		log.logInfo(`DingTalk: initializing stream (clientId=${this.config.clientId.substring(0, 8)}…)`);
 
-		const client = new DWClient({
+		try {
+			const axios = (await import("axios")).default;
+			if (axios.defaults) {
+				const shouldDisableProxy = process.env.DINGTALK_FORCE_PROXY !== "true";
+				if (shouldDisableProxy) {
+					axios.defaults.proxy = false;
+				}
+			}
+		} catch (_err) {
+			// Ignore gracefully
+		}
+
+		this.client = new DWClient({
 			clientId: this.config.clientId,
 			clientSecret: this.config.clientSecret,
-		});
+			autoReconnect: false,
+			keepAlive: false,
+		} as any);
 
-		// Register message handler
-		client.registerCallbackListener(TOPIC_ROBOT, (msg: DWClientDownStream) => {
-			try {
-				const data: RobotMessage = typeof msg.data === "string" ? JSON.parse(msg.data) : msg.data;
-				// Fire-and-forget async processing
-				this.onStreamMessage(data).catch((err: unknown) => {
-					log.logWarning("DingTalk handler error", err instanceof Error ? err.message : String(err));
-				});
-			} catch (err) {
-				log.logWarning("DingTalk: failed to parse message", err instanceof Error ? err.message : String(err));
-			}
-
-			// ACK the message to prevent 60-second server-side retry.
-			// The SDK's onCallback only emits the event but does NOT send an ACK
-			// back to the server automatically (unlike onEvent). Without this,
-			// the server will re-deliver the same message after ~60 seconds.
-			client.socketCallBackResponse(msg.headers.messageId, { status: "SUCCESS", message: "OK" });
-
-			return { status: "SUCCESS" as const, message: "OK" };
+		this.client.registerCallbackListener(TOPIC_ROBOT, (msg: DWClientDownStream) => {
+			return this.handleRawMessage(msg);
 		});
 
 		log.logConnected();
+		await this.doReconnect(true); // Initial connection
+	}
 
-		// Connect (will reconnect automatically by default)
-		await client.connect();
+	private handleRawMessage(msg: DWClientDownStream): { status: "SUCCESS"; message: string } {
+		// 1. Immediate ACK
+		if (msg.headers?.messageId && this.client) {
+			this.client.socketCallBackResponse(msg.headers.messageId, { status: "SUCCESS", message: "OK" });
+		}
+
+		// 2. Protocol deduplication
+		const messageId = msg.headers?.messageId;
+		if (messageId) {
+			if (this.processedMessageIds.includes(messageId)) return { status: "SUCCESS", message: "OK" };
+			this.processedMessageIds.push(messageId);
+			if (this.processedMessageIds.length > 200) this.processedMessageIds.shift();
+		}
+
+		try {
+			const data: RobotMessage = typeof msg.data === "string" ? JSON.parse(msg.data) : msg.data;
+
+			// 3. Business logic deduplication
+			const msgId = (data as any).msgId;
+			if (msgId) {
+				if (this.processedMessageIds.includes(msgId)) return { status: "SUCCESS", message: "OK" };
+				this.processedMessageIds.push(msgId);
+				if (this.processedMessageIds.length > 200) this.processedMessageIds.shift();
+			}
+
+			// Fire-and-forget processing
+			this.onStreamMessage(data).catch((err: unknown) => {
+				log.logWarning("DingTalk handler error", err instanceof Error ? err.message : String(err));
+			});
+		} catch (err) {
+			log.logWarning("DingTalk: failed to parse message", err instanceof Error ? err.message : String(err));
+		}
+
+		return { status: "SUCCESS", message: "OK" };
+	}
+
+	private async doReconnect(immediate = false) {
+		if (this.isReconnecting || this.isStopped || !this.client) return;
+		this.isReconnecting = true;
+
+		if (!immediate && this.reconnectAttempts > 0) {
+			const delay = Math.min(1000 * 2 ** this.reconnectAttempts + Math.random() * 1000, 30000);
+			log.logInfo(`DingTalk: waiting ${Math.round(delay / 1000)}s before reconnecting...`);
+			await new Promise((resolve) => setTimeout(resolve, delay));
+		}
+
+		try {
+			const socket = (this.client as any).socket;
+			if (socket?.readyState === 1 || socket?.readyState === 3) {
+				await (this.client as any).disconnect();
+			}
+
+			await this.client.connect();
+
+			this.lastSocketAvailableTime = Date.now();
+			this.reconnectAttempts = 0; // Success, reset backoff
+			log.logInfo("DingTalk: connected to stream.");
+
+			// Setup keep alive
+			if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
+			this.keepAliveTimer = setInterval(() => {
+				if (this.isStopped) return;
+
+				const elapsed = Date.now() - this.lastSocketAvailableTime;
+				if (elapsed > 90 * 1000 && !this.activeMessageProcessing) {
+					log.logWarning("DingTalk: connection timeout detected (>90s). Keeping active where possible...");
+				}
+
+				try {
+					const s = (this.client as any)?.socket;
+					if (s?.readyState === 1) {
+						s.ping();
+					}
+				} catch (_err) {
+					// Ignore
+				}
+			}, 30 * 1000);
+
+			// Setup native socket events
+			const s = (this.client as any).socket;
+
+			s?.on("pong", () => {
+				this.lastSocketAvailableTime = Date.now();
+			});
+
+			s?.on("close", (code: number, reason: string) => {
+				log.logWarning(`DingTalk: WebSocket closed: code=${code}, reason=${reason}`);
+				if (this.isStopped) return;
+				setTimeout(() => {
+					this.doReconnect(true).catch((err) => {
+						log.logWarning("DingTalk: reconnect failed", err instanceof Error ? err.message : String(err));
+					});
+				}, 1000);
+			});
+
+			s?.on("message", (raw: any) => {
+				try {
+					const msg = JSON.parse(raw);
+					if (msg.type === "SYSTEM" && msg.headers?.topic === "disconnect") {
+						log.logWarning("DingTalk: disconnect event received from server.");
+						if (!this.isStopped) {
+							this.doReconnect(true).catch(() => {});
+						}
+					}
+				} catch (_e) {
+					// skip
+				}
+			});
+		} catch (err) {
+			this.reconnectAttempts++;
+			log.logWarning("DingTalk: connection failed", err instanceof Error ? err.message : String(err));
+		} finally {
+			this.isReconnecting = false;
+		}
+	}
+
+	stop() {
+		this.isStopped = true;
+		if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
+		if (this.client) {
+			try {
+				(this.client as any).disconnect();
+			} catch (_e) {}
+		}
 	}
 
 	/**
@@ -199,7 +332,15 @@ export class DingTalkBot {
 			return false;
 		}
 		log.logInfo(`Enqueueing event for ${event.channelId}: ${event.text.substring(0, 50)}`);
-		queue.enqueue(() => this.handler.handleEvent(event, this, true));
+		queue.enqueue(async () => {
+			this.activeMessageProcessing = true;
+			try {
+				await this.handler.handleEvent(event, this, true);
+			} finally {
+				this.activeMessageProcessing = false;
+				this.lastSocketAvailableTime = Date.now();
+			}
+		});
 		return true;
 	}
 
@@ -245,7 +386,7 @@ export class DingTalkBot {
 	}
 
 	/**
-	 * Send a plain markdown message (fallback when no card).
+	 * Send a normal message natively mapping DM and Group to correct endpoints (fallback when no card).
 	 */
 	async sendPlain(channelId: string, text: string): Promise<void> {
 		const token = await this.getAccessToken();
@@ -258,25 +399,42 @@ export class DingTalkBot {
 		}
 
 		const robotCode = this.config.robotCode || this.config.clientId;
+		const isGroup = meta.conversationType === "2";
+
+		const hasMarkdown = /^[#*>-]|[*_`#\\[\\]]/.test(text) || text.includes("\n");
+
+		const msgKey = hasMarkdown ? "sampleMarkdown" : "sampleText";
+		const msgParam = hasMarkdown ? JSON.stringify({ text, title: "Bot" }) : JSON.stringify({ content: text });
+
+		const url = isGroup
+			? `${DINGTALK_API}/v1.0/robot/groupMessages/send`
+			: `${DINGTALK_API}/v1.0/robot/oToMessages/batchSend`;
+
+		const body: any = {
+			robotCode,
+			msgKey,
+			msgParam,
+		};
+
+		if (isGroup) {
+			body.openConversationId = meta.conversationId;
+		} else {
+			body.userIds = [meta.senderId];
+		}
 
 		try {
-			const resp = await fetch(`${DINGTALK_API}/v1.0/robot/oToMessages/batchSend`, {
+			const resp = await fetch(url, {
 				method: "POST",
 				headers: {
 					"x-acs-dingtalk-access-token": token,
 					"Content-Type": "application/json",
 				},
-				body: JSON.stringify({
-					robotCode,
-					userIds: [meta.senderId],
-					msgKey: "sampleMarkdown",
-					msgParam: JSON.stringify({ text, title: "Bot" }),
-				}),
+				body: JSON.stringify(body),
 			});
 
 			if (!resp.ok) {
-				const body = await resp.text();
-				log.logWarning(`DingTalk plain send failed (${resp.status})`, body);
+				const respBody = await resp.text();
+				log.logWarning(`DingTalk plain send failed (${resp.status})`, respBody);
 			}
 		} catch (err) {
 			log.logWarning("DingTalk plain send error", err instanceof Error ? err.message : String(err));
@@ -452,8 +610,6 @@ export class DingTalkBot {
 		if (textContent) return textContent;
 
 		// 2. richText 类型消息：从 content.richText 列表提取文本片段
-		// TS SDK 没有 richText 类型定义，需要绕过类型系统
-		// 实际 JSON 结构: { msgtype: "richText", content: { richText: [{ text: "..." }, ...] } }
 		const raw = data as unknown as Record<string, unknown>;
 		const contentObj = raw.content as { richText?: Array<Record<string, string>> } | undefined;
 		if (contentObj?.richText) {
@@ -536,7 +692,15 @@ export class DingTalkBot {
 		}
 
 		// Enqueue for processing
-		this.getQueue(channelId).enqueue(() => this.handler.handleEvent(event, this));
+		this.getQueue(channelId).enqueue(async () => {
+			this.activeMessageProcessing = true;
+			try {
+				await this.handler.handleEvent(event, this);
+			} finally {
+				this.activeMessageProcessing = false;
+				this.lastSocketAvailableTime = Date.now();
+			}
+		});
 	}
 
 	private getQueue(channelId: string): ChannelQueue {

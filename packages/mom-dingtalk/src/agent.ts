@@ -31,7 +31,7 @@ export interface AgentRunner {
 }
 
 async function getApiKeyForModel(modelRegistry: ModelRegistry, model: any): Promise<string> {
-	const key = await modelRegistry.getApiKey(model);
+	const key = await modelRegistry.getApiKeyForProvider(model.provider);
 	if (key) return key;
 	// Fallback: try anthropic env var
 	const envKey = process.env.ANTHROPIC_API_KEY;
