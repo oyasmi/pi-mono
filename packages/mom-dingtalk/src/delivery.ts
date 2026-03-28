@@ -53,7 +53,7 @@ class ChannelDeliveryController {
 	private async appendProgress(text: string, shouldLog: boolean): Promise<void> {
 		if (this.closed || this.finalResponseDelivered || !text.trim()) return;
 
-		this.progressText = this.progressText ? `${this.progressText}\n${text}` : text;
+		this.progressText = this.progressText ? `${this.progressText}\n\n${text}` : text;
 		if (this.progressWindowStartedAt === 0) {
 			this.progressWindowStartedAt = Date.now();
 		}

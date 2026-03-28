@@ -457,6 +457,30 @@ function truncate(text: string, maxLen: number): string {
 	return `${text.substring(0, maxLen - 3)}...`;
 }
 
+function sanitizeProgressText(text: string): string {
+	return text
+		.replace(/\uFFFC/g, "")
+		.replace(/\r/g, "")
+		.trim();
+}
+
+function formatProgressEntry(kind: "tool" | "thinking" | "error" | "assistant", text: string): string {
+	const cleaned = sanitizeProgressText(text);
+	if (!cleaned) return "";
+
+	const normalized = cleaned.replace(/\n+/g, " ").trim();
+	switch (kind) {
+		case "tool":
+			return `Running: ${normalized}`;
+		case "thinking":
+			return `Thinking: ${normalized}`;
+		case "error":
+			return `Error: ${normalized}`;
+		case "assistant":
+			return normalized;
+	}
+}
+
 function extractToolResultText(result: unknown): string {
 	if (typeof result === "string") {
 		return result;
@@ -766,7 +790,7 @@ ${result.summary}
 			});
 
 			log.logToolStart(logCtx, agentEvent.toolName, label, agentEvent.args as Record<string, unknown>);
-			queue.enqueue(() => ctx.respond(`_→ ${label}_`, false), "tool label");
+			queue.enqueue(() => ctx.respond(formatProgressEntry("tool", label), false), "tool label");
 		} else if (event.type === "tool_execution_end") {
 			const agentEvent = event as any & { type: "tool_execution_end" };
 			const resultStr = extractToolResultText(agentEvent.result);
@@ -782,7 +806,10 @@ ${result.summary}
 			}
 
 			if (agentEvent.isError) {
-				queue.enqueue(() => ctx.respond(`_Error: ${truncate(resultStr, 200)}_`, false), "tool error");
+				queue.enqueue(
+					() => ctx.respond(formatProgressEntry("error", truncate(resultStr, 200)), false),
+					"tool error",
+				);
 			}
 		} else if (event.type === "message_start") {
 			const agentEvent = event as any & { type: "message_start" };
@@ -831,11 +858,11 @@ ${result.summary}
 
 				for (const thinking of thinkingParts) {
 					log.logThinking(logCtx, thinking);
-					queue.enqueue(() => ctx.respond(`_💭 ${thinking}_`, false), "thinking");
+					queue.enqueue(() => ctx.respond(formatProgressEntry("thinking", thinking), false), "thinking");
 				}
 
 				if (hasToolCalls && text.trim()) {
-					queue.enqueue(() => ctx.respond(text, false), "assistant progress");
+					queue.enqueue(() => ctx.respond(formatProgressEntry("assistant", text), false), "assistant progress");
 				}
 			}
 		} else if (event.type === "turn_end") {
@@ -880,7 +907,10 @@ ${result.summary}
 			}
 		} else if (event.type === "auto_compaction_start") {
 			log.logInfo(`Auto-compaction started (reason: ${(event as any).reason})`);
-			queue.enqueue(() => ctx.respond("_Compacting context..._", false), "compaction start");
+			queue.enqueue(
+				() => ctx.respond(formatProgressEntry("assistant", "Compacting context..."), false),
+				"compaction start",
+			);
 		} else if (event.type === "auto_compaction_end") {
 			const compEvent = event as any;
 			if (compEvent.result) {
@@ -892,7 +922,11 @@ ${result.summary}
 			const retryEvent = event as any;
 			log.logWarning(`Retrying (${retryEvent.attempt}/${retryEvent.maxAttempts})`, retryEvent.errorMessage);
 			queue.enqueue(
-				() => ctx.respond(`_Retrying (${retryEvent.attempt}/${retryEvent.maxAttempts})..._`, false),
+				() =>
+					ctx.respond(
+						formatProgressEntry("assistant", `Retrying (${retryEvent.attempt}/${retryEvent.maxAttempts})...`),
+						false,
+					),
 				"retry",
 			);
 		}
