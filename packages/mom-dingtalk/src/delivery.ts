@@ -14,6 +14,7 @@ class ChannelDeliveryController {
 	private running = false;
 	private closed = false;
 	private finalResponseDelivered = false;
+	private progressWindowStartedAt = 0;
 	private lastDeliveredAt = 0;
 	private timer: NodeJS.Timeout | null = null;
 	private flushWaiters: Array<() => void> = [];
@@ -53,6 +54,9 @@ class ChannelDeliveryController {
 		if (this.closed || this.finalResponseDelivered || !text.trim()) return;
 
 		this.progressText = this.progressText ? `${this.progressText}\n${text}` : text;
+		if (this.progressWindowStartedAt === 0) {
+			this.progressWindowStartedAt = Date.now();
+		}
 		if (shouldLog) {
 			await this.store.logBotResponse(this.event.channelId, text, Date.now().toString());
 		}
@@ -61,17 +65,22 @@ class ChannelDeliveryController {
 		this.bumpRevision(false);
 	}
 
-	private async sendFinal(text: string, shouldLog: boolean): Promise<void> {
-		if (this.closed || this.finalResponseDelivered) return;
+	private async sendFinal(text: string, shouldLog: boolean): Promise<boolean> {
+		if (this.closed || this.finalResponseDelivered) return this.finalResponseDelivered;
 
 		if (shouldLog) {
 			await this.store.logBotResponse(this.event.channelId, text, Date.now().toString());
 		}
 
-		await this.bot.sendPlain(this.event.channelId, text);
+		const delivered = await this.bot.sendPlain(this.event.channelId, text);
+		if (!delivered) {
+			return false;
+		}
+
 		this.finalResponseDelivered = true;
 		this.mode = "finalize-existing";
 		this.bumpRevision(true);
+		return true;
 	}
 
 	private async replaceWithFinal(text: string): Promise<void> {
@@ -106,7 +115,11 @@ class ChannelDeliveryController {
 		const delay =
 			forceImmediate || this.mode !== "progress"
 				? 0
-				: Math.max(0, MIN_UPDATE_INTERVAL_MS - (Date.now() - this.lastDeliveredAt));
+				: Math.max(
+						0,
+						MIN_UPDATE_INTERVAL_MS -
+							(Date.now() - (this.lastDeliveredAt > 0 ? this.lastDeliveredAt : this.progressWindowStartedAt)),
+					);
 
 		if (delay === 0) {
 			void this.runSyncLoop();
@@ -126,8 +139,9 @@ class ChannelDeliveryController {
 		try {
 			while (this.appliedRevision < this.desiredRevision) {
 				const mode = this.mode;
-				if (mode === "progress" && this.lastDeliveredAt > 0) {
-					const remaining = MIN_UPDATE_INTERVAL_MS - (Date.now() - this.lastDeliveredAt);
+				const throttleBaseAt = this.lastDeliveredAt > 0 ? this.lastDeliveredAt : this.progressWindowStartedAt;
+				if (mode === "progress" && throttleBaseAt > 0) {
+					const remaining = MIN_UPDATE_INTERVAL_MS - (Date.now() - throttleBaseAt);
 					if (remaining > 0) {
 						this.timer = setTimeout(() => {
 							this.timer = null;
@@ -139,40 +153,53 @@ class ChannelDeliveryController {
 
 				const revision = this.desiredRevision;
 				const content = this.progressText.trim();
+				let touchedRemote = false;
 
-				if (mode === "progress") {
-					if (content) {
-						await this.bot.streamToCard(this.event.channelId, this.progressText);
-					}
-				} else if (mode === "finalize-existing") {
-					if (content) {
-						await this.bot.finalizeExistingCard(this.event.channelId, this.progressText);
-					} else {
+				try {
+					if (mode === "progress") {
+						if (content) {
+							touchedRemote = await this.bot.streamToCard(this.event.channelId, this.progressText);
+							if (!touchedRemote) {
+								this.bot.discardCard(this.event.channelId);
+							}
+						}
+					} else if (mode === "finalize-existing") {
+						if (content) {
+							touchedRemote = await this.bot.finalizeExistingCard(this.event.channelId, this.progressText);
+							if (!touchedRemote) {
+								this.bot.discardCard(this.event.channelId);
+							}
+						} else {
+							this.bot.discardCard(this.event.channelId);
+						}
+					} else if (mode === "finalize-with-fallback") {
+						if (content) {
+							touchedRemote = await this.bot.finalizeCard(this.event.channelId, this.progressText);
+							if (!touchedRemote) {
+								this.bot.discardCard(this.event.channelId);
+							}
+						} else {
+							this.bot.discardCard(this.event.channelId);
+						}
+					} else if (mode === "silent") {
 						this.bot.discardCard(this.event.channelId);
 					}
-				} else if (mode === "finalize-with-fallback") {
-					if (content) {
-						await this.bot.finalizeCard(this.event.channelId, this.progressText);
-					} else {
-						this.bot.discardCard(this.event.channelId);
-					}
-				} else if (mode === "silent") {
-					if (content) {
-						await this.bot.finalizeExistingCard(this.event.channelId, this.progressText);
-					} else {
-						this.bot.discardCard(this.event.channelId);
-					}
+				} catch (err) {
+					log.logWarning(
+						`[${this.event.channelId}] Delivery sync failed`,
+						err instanceof Error ? err.message : String(err),
+					);
+					this.bot.discardCard(this.event.channelId);
 				}
 
-				this.lastDeliveredAt = Date.now();
+				if (touchedRemote) {
+					this.lastDeliveredAt = Date.now();
+				}
+				if (mode !== "progress" || touchedRemote) {
+					this.progressWindowStartedAt = 0;
+				}
 				this.appliedRevision = revision;
 			}
-		} catch (err) {
-			log.logWarning(
-				`[${this.event.channelId}] Delivery sync failed`,
-				err instanceof Error ? err.message : String(err),
-			);
-			this.appliedRevision = this.desiredRevision;
 		} finally {
 			this.running = false;
 			this.resolveFlushWaiters();

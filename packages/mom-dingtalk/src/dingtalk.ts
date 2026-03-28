@@ -49,7 +49,7 @@ export interface DingTalkContext {
 	};
 	channelName?: string;
 	respond: (text: string, shouldLog?: boolean) => Promise<void>;
-	respondPlain: (text: string, shouldLog?: boolean) => Promise<void>;
+	respondPlain: (text: string, shouldLog?: boolean) => Promise<boolean>;
 	replaceMessage: (text: string) => Promise<void>;
 	respondInThread: (text: string) => Promise<void>;
 	setTyping: (isTyping: boolean) => Promise<void>;
@@ -391,11 +391,15 @@ export class DingTalkBot {
 		}
 		if (!card || card.finished) {
 			if (finalize) {
-				await this.sendPlain(channelId, content);
+				return this.sendPlain(channelId, content);
 			}
 			return false;
 		}
-		return this.streamCard(card, content, finalize);
+		const streamed = await this.streamCard(card, content, finalize);
+		if (!streamed) {
+			this.activeCards.delete(channelId);
+		}
+		return streamed;
 	}
 
 	/**
@@ -412,19 +416,20 @@ export class DingTalkBot {
 			return false;
 		}
 
-		await this.streamCard(card, content, true);
+		const finalized = await this.streamCard(card, content, true);
 		this.activeCards.delete(channelId);
-		return true;
+		return finalized;
 	}
 
 	/**
 	 * Finalize and remove the active card for a channel.
 	 */
-	async finalizeCard(channelId: string, content: string): Promise<void> {
+	async finalizeCard(channelId: string, content: string): Promise<boolean> {
 		const finalized = await this.finalizeExistingCard(channelId, content);
 		if (!finalized) {
-			await this.sendPlain(channelId, content);
+			return this.sendPlain(channelId, content);
 		}
+		return true;
 	}
 
 	discardCard(channelId: string): void {
@@ -434,14 +439,14 @@ export class DingTalkBot {
 	/**
 	 * Send a normal message natively mapping DM and Group to correct endpoints (fallback when no card).
 	 */
-	async sendPlain(channelId: string, text: string): Promise<void> {
+	async sendPlain(channelId: string, text: string): Promise<boolean> {
 		const token = await this.getAccessToken();
-		if (!token) return;
+		if (!token) return false;
 
 		const meta = this.getConversationMeta(channelId);
 		if (!meta) {
 			log.logWarning(`No conversation metadata for ${channelId}, cannot send plain message`);
-			return;
+			return false;
 		}
 
 		const robotCode = this.config.robotCode || this.config.clientId;
@@ -475,12 +480,14 @@ export class DingTalkBot {
 					"Content-Type": "application/json",
 				},
 			});
+			return true;
 		} catch (err) {
 			if (axios.isAxiosError(err) && err.response) {
 				log.logWarning(`DingTalk plain send failed (${err.response.status})`, JSON.stringify(err.response.data));
 			} else {
 				log.logWarning("DingTalk plain send error", err instanceof Error ? err.message : String(err));
 			}
+			return false;
 		}
 	}
 

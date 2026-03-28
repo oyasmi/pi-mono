@@ -30,6 +30,20 @@ export interface AgentRunner {
 	abort(): void;
 }
 
+type FinalOutcome = { kind: "none" } | { kind: "silent" } | { kind: "final"; text: string };
+
+function isSilentOutcome(outcome: FinalOutcome): outcome is { kind: "silent" } {
+	return outcome.kind === "silent";
+}
+
+function isFinalOutcome(outcome: FinalOutcome): outcome is { kind: "final"; text: string } {
+	return outcome.kind === "final";
+}
+
+function getFinalOutcomeText(outcome: FinalOutcome): string | null {
+	return isFinalOutcome(outcome) ? outcome.text : null;
+}
+
 async function getApiKeyForModel(modelRegistry: ModelRegistry, model: any): Promise<string> {
 	const key = await modelRegistry.getApiKeyForProvider(model.provider);
 	if (key) return key;
@@ -420,8 +434,17 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	const soul = getSoul(workspaceDir);
 	const agentConfig = getAgentConfig(channelDir);
 	const memory = getMemory(channelDir);
-	const skills = loadMomSkills(channelDir, workspacePath);
-	const systemPrompt = buildSystemPrompt(workspacePath, channelId, soul, agentConfig, memory, sandboxConfig, skills);
+	const initialSkills = loadMomSkills(channelDir, workspacePath);
+	let currentSkills = initialSkills;
+	const systemPrompt = buildSystemPrompt(
+		workspacePath,
+		channelId,
+		soul,
+		agentConfig,
+		memory,
+		sandboxConfig,
+		initialSkills,
+	);
 
 	// Create session manager
 	const contextFile = join(channelDir, "context.jsonl");
@@ -466,11 +489,10 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		cwd: process.cwd(),
 		agentDir: momAgentDir,
 		settingsManager: settingsManager as any,
-		skillsOverride: (base) => {
-			// Append workspace & channel skills
-			base.skills.push(...skills);
-			return base;
-		},
+		skillsOverride: (base) => ({
+			skills: [...base.skills, ...currentSkills],
+			diagnostics: base.diagnostics,
+		}),
 	});
 
 	const baseToolsOverride = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
@@ -487,7 +509,26 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	});
 
 	// Mutable per-run state
-	const runState = {
+	const runState: {
+		ctx: DingTalkContext | null;
+		logCtx: { channelId: string; userName?: string; channelName?: string } | null;
+		queue: {
+			enqueue(fn: () => Promise<void>, errorContext: string): void;
+			enqueueMessage(text: string, target: "main" | "thread", errorContext: string, doLog?: boolean): void;
+		} | null;
+		pendingTools: Map<string, { toolName: string; args: unknown; startTime: number }>;
+		totalUsage: {
+			input: number;
+			output: number;
+			cacheRead: number;
+			cacheWrite: number;
+			cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+		};
+		stopReason: string;
+		errorMessage: string | undefined;
+		finalOutcome: FinalOutcome;
+		finalResponseDelivered: boolean;
+	} = {
 		ctx: null as DingTalkContext | null,
 		logCtx: null as { channelId: string; userName?: string; channelName?: string } | null,
 		queue: null as {
@@ -504,7 +545,8 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		},
 		stopReason: "stop",
 		errorMessage: undefined as string | undefined,
-		finalResponseQueued: false,
+		finalOutcome: { kind: "none" },
+		finalResponseDelivered: false,
 	};
 
 	// Subscribe to events ONCE
@@ -614,11 +656,28 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 					.map((part) => part.text)
 					.join("\n");
 
-				if (finalText.trim() && finalText.trim() !== "[SILENT]" && !finalText.trim().startsWith("[SILENT]")) {
-					runState.finalResponseQueued = true;
-					log.logResponse(logCtx, finalText);
-					queue.enqueue(() => ctx.respondPlain(finalText), "final response");
+				const trimmedFinalText = finalText.trim();
+				if (!trimmedFinalText) {
+					return;
 				}
+
+				if (trimmedFinalText === "[SILENT]" || trimmedFinalText.startsWith("[SILENT]")) {
+					runState.finalOutcome = { kind: "silent" };
+					return;
+				}
+
+				if (runState.finalOutcome.kind === "final" && runState.finalOutcome.text.trim() === trimmedFinalText) {
+					return;
+				}
+
+				runState.finalOutcome = { kind: "final", text: finalText };
+				log.logResponse(logCtx, finalText);
+				queue.enqueue(async () => {
+					const delivered = await ctx.respondPlain(finalText);
+					if (delivered) {
+						runState.finalResponseDelivered = true;
+					}
+				}, "final response");
 			}
 		} else if (event.type === "auto_compaction_start") {
 			log.logInfo(`Auto-compaction started (reason: ${(event as any).reason})`);
@@ -642,41 +701,6 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 	return {
 		async run(ctx: DingTalkContext, _store: ChannelStore): Promise<{ stopReason: string; errorMessage?: string }> {
-			// Ensure channel directory exists
-			await mkdir(channelDir, { recursive: true });
-
-			// Reload resources before doing anything
-			await resourceLoader.reload();
-
-			// Sync messages from log.jsonl
-			const syncedCount = syncLogToSessionManager(sessionManager, channelDir, ctx.message.ts);
-			if (syncedCount > 0) {
-				log.logInfo(`[${channelId}] Synced ${syncedCount} messages from log.jsonl`);
-			}
-
-			// Reload messages from context.jsonl
-			const reloadedSession = sessionManager.buildSessionContext();
-			if (reloadedSession.messages.length > 0) {
-				agent.replaceMessages(reloadedSession.messages);
-				log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
-			}
-
-			// Update system prompt with fresh config
-			const soul = getSoul(workspaceDir);
-			const agentConfig = getAgentConfig(channelDir);
-			const memory = getMemory(channelDir);
-			const skills = loadMomSkills(channelDir, workspacePath);
-			const systemPrompt = buildSystemPrompt(
-				workspacePath,
-				channelId,
-				soul,
-				agentConfig,
-				memory,
-				sandboxConfig,
-				skills,
-			);
-			session.agent.setSystemPrompt(systemPrompt);
-
 			// Reset per-run state
 			runState.ctx = ctx;
 			runState.logCtx = {
@@ -694,7 +718,8 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			};
 			runState.stopReason = "stop";
 			runState.errorMessage = undefined;
-			runState.finalResponseQueued = false;
+			runState.finalOutcome = { kind: "none" };
+			runState.finalResponseDelivered = false;
 
 			// Create queue for this run
 			let queueChain = Promise.resolve();
@@ -717,54 +742,83 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				},
 			};
 
-			// Log context info
-			log.logInfo(`Context sizes - system: ${systemPrompt.length} chars, memory: ${memory.length} chars`);
-
-			// Build user message with timestamp and username prefix
-			const now = new Date();
-			const pad = (n: number) => n.toString().padStart(2, "0");
-			const offset = -now.getTimezoneOffset();
-			const offsetSign = offset >= 0 ? "+" : "-";
-			const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
-			const offsetMins = pad(Math.abs(offset) % 60);
-			const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
-			const userMessage = `[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
-
-			// Debug: write context to last_prompt.jsonl (only with MOM_DEBUG=1)
-			if (process.env.MOM_DEBUG) {
-				const debugContext = {
-					systemPrompt,
-					messages: session.messages,
-					newUserMessage: userMessage,
-				};
-				await writeFile(join(channelDir, "last_prompt.json"), JSON.stringify(debugContext, null, 2));
-			}
-
-			await session.prompt(userMessage);
-
-			// Wait for queued messages
-			await queueChain;
-
 			try {
-				// Handle error case
-				if (runState.stopReason === "error" && runState.errorMessage && !runState.finalResponseQueued) {
-					try {
-						await ctx.replaceMessage("_Sorry, something went wrong_");
-					} catch (err) {
-						const errMsg = err instanceof Error ? err.message : String(err);
-						log.logWarning("Failed to post error message", errMsg);
-					}
-				} else {
-					// Final message update
-					const messages = session.messages;
-					const lastAssistant = messages.filter((m: any) => m.role === "assistant").pop() as any;
-					const finalText =
-						lastAssistant?.content
-							?.filter((c: any): c is { type: "text"; text: string } => c.type === "text")
-							?.map((c: any) => c.text)
-							?.join("\n") || "";
+				// Ensure channel directory exists
+				await mkdir(channelDir, { recursive: true });
 
-					if (finalText.trim() === "[SILENT]" || finalText.trim().startsWith("[SILENT]")) {
+				// Update system prompt and runtime resources with fresh config
+				const soul = getSoul(workspaceDir);
+				const agentConfig = getAgentConfig(channelDir);
+				const memory = getMemory(channelDir);
+				const skills = loadMomSkills(channelDir, workspacePath);
+				currentSkills = skills;
+				const systemPrompt = buildSystemPrompt(
+					workspacePath,
+					channelId,
+					soul,
+					agentConfig,
+					memory,
+					sandboxConfig,
+					skills,
+				);
+				session.agent.setSystemPrompt(systemPrompt);
+				await session.reload();
+
+				// Sync messages from log.jsonl
+				const syncedCount = syncLogToSessionManager(sessionManager, channelDir, ctx.message.ts);
+				if (syncedCount > 0) {
+					log.logInfo(`[${channelId}] Synced ${syncedCount} messages from log.jsonl`);
+				}
+
+				// Reload messages from context.jsonl
+				const reloadedSession = sessionManager.buildSessionContext();
+				if (reloadedSession.messages.length > 0) {
+					agent.replaceMessages(reloadedSession.messages);
+					log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
+				}
+
+				// Log context info
+				log.logInfo(`Context sizes - system: ${systemPrompt.length} chars, memory: ${memory.length} chars`);
+
+				// Build user message with timestamp and username prefix
+				const now = new Date();
+				const pad = (n: number) => n.toString().padStart(2, "0");
+				const offset = -now.getTimezoneOffset();
+				const offsetSign = offset >= 0 ? "+" : "-";
+				const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
+				const offsetMins = pad(Math.abs(offset) % 60);
+				const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
+				const userMessage = `[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
+
+				// Debug: write context to last_prompt.jsonl (only with MOM_DEBUG=1)
+				if (process.env.MOM_DEBUG) {
+					const debugContext = {
+						systemPrompt,
+						messages: session.messages,
+						newUserMessage: userMessage,
+					};
+					await writeFile(join(channelDir, "last_prompt.json"), JSON.stringify(debugContext, null, 2));
+				}
+
+				await session.prompt(userMessage);
+			} catch (err) {
+				runState.stopReason = "error";
+				runState.errorMessage = err instanceof Error ? err.message : String(err);
+				log.logWarning(`[${channelId}] Runner failed`, runState.errorMessage);
+			} finally {
+				await queueChain;
+				const finalOutcome = runState.finalOutcome;
+				const finalOutcomeText = getFinalOutcomeText(finalOutcome);
+
+				try {
+					if (runState.stopReason === "error" && runState.errorMessage && !runState.finalResponseDelivered) {
+						try {
+							await ctx.replaceMessage("_Sorry, something went wrong_");
+						} catch (err) {
+							const errMsg = err instanceof Error ? err.message : String(err);
+							log.logWarning("Failed to post error message", errMsg);
+						}
+					} else if (isSilentOutcome(finalOutcome)) {
 						try {
 							await ctx.deleteMessage();
 							log.logInfo("Silent response - deleted message");
@@ -772,44 +826,44 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 							const errMsg = err instanceof Error ? err.message : String(err);
 							log.logWarning("Failed to delete message for silent response", errMsg);
 						}
-					} else if (finalText.trim() && !runState.finalResponseQueued) {
+					} else if (finalOutcomeText && !runState.finalResponseDelivered) {
 						try {
-							await ctx.replaceMessage(finalText);
+							await ctx.replaceMessage(finalOutcomeText);
 						} catch (err) {
 							const errMsg = err instanceof Error ? err.message : String(err);
 							log.logWarning("Failed to replace message with final text", errMsg);
 						}
 					}
+
+					await ctx.flush();
+				} finally {
+					await ctx.close();
 				}
 
-				await ctx.flush();
-			} finally {
-				await ctx.close();
+				// Log usage summary
+				if (runState.totalUsage.cost.total > 0) {
+					const messages = session.messages;
+					const lastAssistantMessage = messages
+						.slice()
+						.reverse()
+						.find((m: any) => m.role === "assistant" && m.stopReason !== "aborted") as any;
+
+					const contextTokens = lastAssistantMessage
+						? lastAssistantMessage.usage.input +
+							lastAssistantMessage.usage.output +
+							lastAssistantMessage.usage.cacheRead +
+							lastAssistantMessage.usage.cacheWrite
+						: 0;
+					const contextWindow = model.contextWindow || 200000;
+
+					log.logUsageSummary(runState.logCtx!, runState.totalUsage, contextTokens, contextWindow);
+				}
+
+				// Clear run state
+				runState.ctx = null;
+				runState.logCtx = null;
+				runState.queue = null;
 			}
-
-			// Log usage summary
-			if (runState.totalUsage.cost.total > 0) {
-				const messages = session.messages;
-				const lastAssistantMessage = messages
-					.slice()
-					.reverse()
-					.find((m: any) => m.role === "assistant" && m.stopReason !== "aborted") as any;
-
-				const contextTokens = lastAssistantMessage
-					? lastAssistantMessage.usage.input +
-						lastAssistantMessage.usage.output +
-						lastAssistantMessage.usage.cacheRead +
-						lastAssistantMessage.usage.cacheWrite
-					: 0;
-				const contextWindow = model.contextWindow || 200000;
-
-				log.logUsageSummary(runState.logCtx!, runState.totalUsage, contextTokens, contextWindow);
-			}
-
-			// Clear run state
-			runState.ctx = null;
-			runState.logCtx = null;
-			runState.queue = null;
 
 			return { stopReason: runState.stopReason, errorMessage: runState.errorMessage };
 		},
