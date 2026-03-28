@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { shellEscape } from "./shell-escape.js";
 
 export type SandboxConfig = { type: "host" } | { type: "docker"; container: string };
 
@@ -213,9 +214,4 @@ function killProcessTree(pid: number): void {
 			}
 		}
 	}
-}
-
-function shellEscape(s: string): string {
-	// Escape for passing to sh -c
-	return `'${s.replace(/'/g, "'\\''")}'`;
 }

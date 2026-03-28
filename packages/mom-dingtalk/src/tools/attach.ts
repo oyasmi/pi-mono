@@ -2,46 +2,49 @@ import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { basename, resolve as resolvePath } from "path";
 
-// This will be set by the agent before running
-let uploadFn: ((filePath: string, title?: string) => Promise<void>) | null = null;
-
-export function setUploadFunction(fn: (filePath: string, title?: string) => Promise<void>): void {
-	uploadFn = fn;
-}
-
 const attachSchema = Type.Object({
 	label: Type.String({ description: "Brief description of what you're sharing (shown to user)" }),
 	path: Type.String({ description: "Path to the file to attach" }),
 	title: Type.Optional(Type.String({ description: "Title for the file (defaults to filename)" })),
 });
 
-export const attachTool: AgentTool<typeof attachSchema> = {
-	name: "attach",
-	label: "attach",
-	description:
-		"Attach a file to your response. Use this to share files, images, or documents with the user. Only files from /workspace/ can be attached.",
-	parameters: attachSchema,
-	execute: async (
-		_toolCallId: string,
-		{ path, title }: { label: string; path: string; title?: string },
-		signal?: AbortSignal,
-	) => {
-		if (!uploadFn) {
-			throw new Error("Upload function not configured");
-		}
+export type UploadFunction = (filePath: string, title?: string) => Promise<void>;
 
-		if (signal?.aborted) {
-			throw new Error("Operation aborted");
-		}
+/**
+ * Create the attach tool. If no uploadFn is provided, the tool will throw
+ * an informative error guiding the LLM to use alternative approaches.
+ */
+export function createAttachTool(uploadFn?: UploadFunction): AgentTool<typeof attachSchema> {
+	return {
+		name: "attach",
+		label: "attach",
+		description:
+			"Attach a file to your response. Use this to share files, images, or documents with the user. Only files from /workspace/ can be attached.",
+		parameters: attachSchema,
+		execute: async (
+			_toolCallId: string,
+			{ path, title }: { label: string; path: string; title?: string },
+			signal?: AbortSignal,
+		) => {
+			if (!uploadFn) {
+				throw new Error(
+					"File upload is not supported in DingTalk mode. Output file content as text instead, or use bash to host files.",
+				);
+			}
 
-		const absolutePath = resolvePath(path);
-		const fileName = title || basename(absolutePath);
+			if (signal?.aborted) {
+				throw new Error("Operation aborted");
+			}
 
-		await uploadFn(absolutePath, fileName);
+			const absolutePath = resolvePath(path);
+			const fileName = title || basename(absolutePath);
 
-		return {
-			content: [{ type: "text" as const, text: `Attached file: ${fileName}` }],
-			details: undefined,
-		};
-	},
-};
+			await uploadFn(absolutePath, fileName);
+
+			return {
+				content: [{ type: "text" as const, text: `Attached file: ${fileName}` }],
+				details: undefined,
+			};
+		},
+	};
+}

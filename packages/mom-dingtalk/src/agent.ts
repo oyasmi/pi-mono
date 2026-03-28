@@ -20,7 +20,7 @@ import type { DingTalkContext } from "./dingtalk.js";
 import * as log from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelStore } from "./store.js";
-import { createMomTools, setUploadFunction } from "./tools/index.js";
+import { createMomTools } from "./tools/index.js";
 
 // Default model - will be overridden by ModelRegistry if custom models are configured
 const defaultModel = getModel("anthropic", "claude-sonnet-4-5");
@@ -132,7 +132,14 @@ function getMemory(channelDir: string): string {
 		return "(no working memory yet)";
 	}
 
-	return parts.join("\n\n");
+	const combined = parts.join("\n\n");
+
+	// Warn if memory is getting too large (consumes system prompt token budget)
+	if (combined.length > 5000) {
+		return `\u26a0\ufe0f Memory is large (${combined.length} chars). Consolidate: remove outdated entries, merge duplicates, tighten descriptions.\n\n${combined}`;
+	}
+
+	return combined;
 }
 
 function loadMomSkills(channelDir: string, workspacePath: string): Skill[] {
@@ -304,7 +311,14 @@ Maximum 5 events can be queued.`);
 Write to MEMORY.md files to persist context across conversations.
 - Global (${workspacePath}/MEMORY.md): skills, preferences, project info
 - Channel (${channelPath}/MEMORY.md): channel-specific decisions, ongoing work
-Update when you learn something important or when asked to remember something.
+
+### Guidelines
+- Keep each MEMORY.md concise (target: under 50 lines)
+- Use clear headers to organize entries (## Preferences, ## Projects, etc.)
+- Remove outdated entries when they are no longer relevant
+- Merge duplicate or redundant items
+- Prefer structured formats (lists, key-value pairs) over prose
+- Update when you learn something important or when asked to remember something
 
 ### Current Memory
 ${memory}`);
@@ -636,12 +650,6 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			);
 			session.agent.setSystemPrompt(systemPrompt);
 
-			// Set up file upload function (simplified for DingTalk)
-			setUploadFunction(async (_filePath: string, _title?: string) => {
-				// DingTalk file upload is more complex, skip for now
-				log.logWarning("File upload not yet supported for DingTalk");
-			});
-
 			// Reset per-run state
 			runState.ctx = ctx;
 			runState.logCtx = {
@@ -694,13 +702,15 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
 			const userMessage = `[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
 
-			// Debug: write context to last_prompt.jsonl
-			const debugContext = {
-				systemPrompt,
-				messages: session.messages,
-				newUserMessage: userMessage,
-			};
-			await writeFile(join(channelDir, "last_prompt.jsonl"), JSON.stringify(debugContext, null, 2));
+			// Debug: write context to last_prompt.jsonl (only with MOM_DEBUG=1)
+			if (process.env.MOM_DEBUG) {
+				const debugContext = {
+					systemPrompt,
+					messages: session.messages,
+					newUserMessage: userMessage,
+				};
+				await writeFile(join(channelDir, "last_prompt.json"), JSON.stringify(debugContext, null, 2));
+			}
 
 			await session.prompt(userMessage);
 

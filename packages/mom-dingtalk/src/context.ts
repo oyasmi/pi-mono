@@ -12,7 +12,7 @@
 
 import type { UserMessage } from "@mariozechner/pi-ai";
 import type { SessionManager, SessionMessageEntry } from "@mariozechner/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
 // ============================================================================
@@ -31,6 +31,9 @@ interface LogMessage {
 /**
  * Sync user messages from log.jsonl to SessionManager.
  *
+ * Uses byte-offset tracking for incremental reads (only processes new content)
+ * and timestamp-based dedup for crash safety.
+ *
  * This ensures that messages logged while mom wasn't running (channel chatter,
  * messages while busy) are added to the LLM context.
  *
@@ -45,48 +48,66 @@ export function syncLogToSessionManager(
 	excludeTs?: string,
 ): number {
 	const logFile = join(channelDir, "log.jsonl");
+	const syncOffsetFile = join(channelDir, ".sync-offset");
 
 	if (!existsSync(logFile)) return 0;
 
-	// Build set of existing message content from session
-	const existingMessages = new Set<string>();
+	// Read sync offset (byte position of last processed content)
+	let offset = 0;
+	if (existsSync(syncOffsetFile)) {
+		try {
+			offset = Number(readFileSync(syncOffsetFile, "utf-8").trim()) || 0;
+		} catch {
+			offset = 0;
+		}
+	}
+
+	// Check file size
+	const fileStats = statSync(logFile);
+	if (fileStats.size < offset) {
+		// File was truncated or rotated — reset to beginning
+		offset = 0;
+	}
+	if (fileStats.size === offset) {
+		return 0; // No new content
+	}
+
+	// Read only new bytes from log.jsonl
+	const bytesToRead = fileStats.size - offset;
+	const fd = openSync(logFile, "r");
+	let newContent: string;
+	try {
+		const buffer = Buffer.alloc(bytesToRead);
+		readSync(fd, buffer, 0, bytesToRead, offset);
+		newContent = buffer.toString("utf-8");
+	} finally {
+		closeSync(fd);
+	}
+
+	const newLines = newContent.trim().split("\n").filter(Boolean);
+	if (newLines.length === 0) {
+		writeFileSync(syncOffsetFile, String(fileStats.size));
+		return 0;
+	}
+
+	// Build set of existing user message timestamps for crash-safe dedup.
+	// This prevents duplicates if the process crashed after appendMessage()
+	// but before writing the sync offset.
+	const existingTimestamps = new Set<number>();
 	for (const entry of sessionManager.getEntries()) {
 		if (entry.type === "message") {
 			const msgEntry = entry as SessionMessageEntry;
-			const msg = msgEntry.message as { role: string; content?: unknown };
-			if (msg.role === "user" && msg.content !== undefined) {
-				const content = msg.content;
-				if (typeof content === "string") {
-					// Strip timestamp prefix for comparison
-					// Format: [YYYY-MM-DD HH:MM:SS+HH:MM] [username]: text
-					const normalized = content.replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] /, "");
-					existingMessages.add(normalized);
-				} else if (Array.isArray(content)) {
-					for (const part of content) {
-						if (
-							typeof part === "object" &&
-							part !== null &&
-							"type" in part &&
-							part.type === "text" &&
-							"text" in part
-						) {
-							let normalized = (part as { type: "text"; text: string }).text;
-							normalized = normalized.replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] /, "");
-							existingMessages.add(normalized);
-						}
-					}
-				}
+			const msg = msgEntry.message as { role?: string; timestamp?: number };
+			if (msg.role === "user" && typeof msg.timestamp === "number") {
+				existingTimestamps.add(msg.timestamp);
 			}
 		}
 	}
 
-	// Read log.jsonl and find user messages not in context
-	const logContent = readFileSync(logFile, "utf-8");
-	const logLines = logContent.trim().split("\n").filter(Boolean);
-
+	// Process new log lines
 	const newMessages: Array<{ timestamp: number; message: UserMessage }> = [];
 
-	for (const line of logLines) {
+	for (const line of newLines) {
 		try {
 			const logMsg: LogMessage = JSON.parse(line);
 
@@ -97,37 +118,38 @@ export function syncLogToSessionManager(
 			// Skip the current message being processed (will be added via prompt())
 			if (excludeTs && ts === excludeTs) continue;
 
-			// Skip bot messages - added through agent flow
+			// Skip bot messages — they're managed by SessionManager
 			if (logMsg.isBot) continue;
 
-			// Build the message text as it would appear in context
-			const messageText = `[${logMsg.userName || logMsg.user || "unknown"}]: ${logMsg.text || ""}`;
-
-			// Skip if this exact message text is already in context
-			if (existingMessages.has(messageText)) continue;
-
 			const msgTime = new Date(date).getTime() || Date.now();
-			const userMessage: UserMessage = {
-				role: "user",
-				content: [{ type: "text", text: messageText }],
-				timestamp: msgTime,
-			};
 
-			newMessages.push({ timestamp: msgTime, message: userMessage });
-			existingMessages.add(messageText); // Track to avoid duplicates within this sync
+			// Skip if already in context (crash recovery dedup)
+			if (existingTimestamps.has(msgTime)) continue;
+			existingTimestamps.add(msgTime); // Track within this batch
+
+			const messageText = `[${logMsg.userName || logMsg.user || "unknown"}]: ${logMsg.text || ""}`;
+			newMessages.push({
+				timestamp: msgTime,
+				message: {
+					role: "user",
+					content: [{ type: "text", text: messageText }],
+					timestamp: msgTime,
+				},
+			});
 		} catch {
 			// Skip malformed lines
 		}
 	}
 
-	if (newMessages.length === 0) return 0;
-
-	// Sort by timestamp and add to session
-	newMessages.sort((a, b) => a.timestamp - b.timestamp);
-
-	for (const { message } of newMessages) {
-		sessionManager.appendMessage(message);
+	if (newMessages.length > 0) {
+		newMessages.sort((a, b) => a.timestamp - b.timestamp);
+		for (const { message } of newMessages) {
+			sessionManager.appendMessage(message);
+		}
 	}
+
+	// Update sync offset to current file end
+	writeFileSync(syncOffsetFile, String(fileStats.size));
 
 	return newMessages.length;
 }

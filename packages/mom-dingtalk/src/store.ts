@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync } from "fs";
-import { appendFile } from "fs/promises";
-import { join } from "path";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync } from "fs";
+import { appendFile, writeFile } from "fs/promises";
+import { dirname, join } from "path";
 
 export interface LoggedMessage {
 	date: string;
@@ -58,6 +58,9 @@ export class ChannelStore {
 
 		const logPath = join(this.getChannelDir(channelId), "log.jsonl");
 
+		// Rotate if file exceeds size limit
+		this.rotateIfNeeded(logPath);
+
 		// Ensure message has a date field
 		if (!message.date) {
 			message.date = new Date().toISOString();
@@ -66,6 +69,29 @@ export class ChannelStore {
 		const line = `${JSON.stringify(message)}\n`;
 		await appendFile(logPath, line, "utf-8");
 		return true;
+	}
+
+	/**
+	 * Rotate log file if it exceeds 1MB.
+	 * Keeps one backup (log.jsonl.1) and resets the sync offset.
+	 */
+	private rotateIfNeeded(logPath: string): void {
+		try {
+			if (!existsSync(logPath)) return;
+			const stats = statSync(logPath);
+			if (stats.size > 1_000_000) {
+				renameSync(logPath, `${logPath}.1`);
+				// Reset sync offset since log.jsonl was replaced
+				const syncOffsetPath = join(dirname(logPath), ".sync-offset");
+				try {
+					writeFile(syncOffsetPath, "0", "utf-8").catch(() => {});
+				} catch {
+					/* ignore */
+				}
+			}
+		} catch {
+			// Ignore rotation errors
+		}
 	}
 
 	/**

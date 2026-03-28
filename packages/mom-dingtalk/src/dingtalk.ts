@@ -8,6 +8,7 @@
  * - Per-channel message queuing
  */
 
+import axios from "axios";
 import { DWClient, type DWClientDownStream, type RobotMessage, TOPIC_ROBOT } from "dingtalk-stream";
 import * as log from "./log.js";
 
@@ -144,12 +145,27 @@ export class DingTalkBot {
 	private isStopped = false;
 	private reconnectAttempts = 0;
 
-	// Deduplication cache
-	private processedMessageIds: string[] = [];
+	// Deduplication cache (Set for O(1) lookup, order array for FIFO eviction)
+	private processedIds = new Set<string>();
+	private processedIdsOrder: string[] = [];
 
 	constructor(handler: DingTalkHandler, config: DingTalkConfig) {
 		this.handler = handler;
 		this.config = config;
+	}
+
+	/**
+	 * Mark an ID as processed. Returns true if this is a new ID, false if already seen.
+	 * Maintains a FIFO buffer of at most 200 entries.
+	 */
+	private markProcessed(id: string): boolean {
+		if (this.processedIds.has(id)) return false;
+		this.processedIds.add(id);
+		this.processedIdsOrder.push(id);
+		while (this.processedIdsOrder.length > 200) {
+			this.processedIds.delete(this.processedIdsOrder.shift()!);
+		}
+		return true;
 	}
 
 	// ==========================================================================
@@ -168,16 +184,9 @@ export class DingTalkBot {
 
 		log.logInfo(`DingTalk: initializing stream (clientId=${this.config.clientId.substring(0, 8)}…)`);
 
-		try {
-			const axios = (await import("axios")).default;
-			if (axios.defaults) {
-				const shouldDisableProxy = process.env.DINGTALK_FORCE_PROXY !== "true";
-				if (shouldDisableProxy) {
-					axios.defaults.proxy = false;
-				}
-			}
-		} catch (_err) {
-			// Ignore gracefully
+		const shouldDisableProxy = process.env.DINGTALK_FORCE_PROXY !== "true";
+		if (shouldDisableProxy && axios.defaults) {
+			axios.defaults.proxy = false;
 		}
 
 		this.client = new DWClient({
@@ -203,10 +212,8 @@ export class DingTalkBot {
 
 		// 2. Protocol deduplication
 		const messageId = msg.headers?.messageId;
-		if (messageId) {
-			if (this.processedMessageIds.includes(messageId)) return { status: "SUCCESS", message: "OK" };
-			this.processedMessageIds.push(messageId);
-			if (this.processedMessageIds.length > 200) this.processedMessageIds.shift();
+		if (messageId && !this.markProcessed(messageId)) {
+			return { status: "SUCCESS", message: "OK" };
 		}
 
 		try {
@@ -214,10 +221,8 @@ export class DingTalkBot {
 
 			// 3. Business logic deduplication
 			const msgId = (data as any).msgId;
-			if (msgId) {
-				if (this.processedMessageIds.includes(msgId)) return { status: "SUCCESS", message: "OK" };
-				this.processedMessageIds.push(msgId);
-				if (this.processedMessageIds.length > 200) this.processedMessageIds.shift();
+			if (msgId && !this.markProcessed(msgId)) {
+				return { status: "SUCCESS", message: "OK" };
 			}
 
 			// Fire-and-forget processing
@@ -234,6 +239,7 @@ export class DingTalkBot {
 	private async doReconnect(immediate = false) {
 		if (this.isReconnecting || this.isStopped || !this.client) return;
 		this.isReconnecting = true;
+		let connectionFailed = false;
 
 		if (!immediate && this.reconnectAttempts > 0) {
 			const delay = Math.min(1000 * 2 ** this.reconnectAttempts + Math.random() * 1000, 30000);
@@ -305,9 +311,15 @@ export class DingTalkBot {
 			});
 		} catch (err) {
 			this.reconnectAttempts++;
+			connectionFailed = true;
 			log.logWarning("DingTalk: connection failed", err instanceof Error ? err.message : String(err));
 		} finally {
 			this.isReconnecting = false;
+		}
+
+		// Auto-retry on failure with exponential backoff
+		if (connectionFailed && !this.isStopped) {
+			this.doReconnect().catch(() => {});
 		}
 	}
 
@@ -401,7 +413,7 @@ export class DingTalkBot {
 		const robotCode = this.config.robotCode || this.config.clientId;
 		const isGroup = meta.conversationType === "2";
 
-		const hasMarkdown = /^[#*>-]|[*_`#\\[\\]]/.test(text) || text.includes("\n");
+		const hasMarkdown = /^#{1,6}\s|^\s*[-*]\s|\*\*.*\*\*|```|`[^`]+`|\[.*?\]\(.*?\)/m.test(text);
 
 		const msgKey = hasMarkdown ? "sampleMarkdown" : "sampleText";
 		const msgParam = hasMarkdown ? JSON.stringify({ text, title: "Bot" }) : JSON.stringify({ content: text });
