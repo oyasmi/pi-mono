@@ -141,6 +141,7 @@ export class DingTalkBot {
 	// Access token cache
 	private accessToken: string | null = null;
 	private tokenExpiry = 0;
+	private tokenRefreshPromise: Promise<string | null> | null = null;
 
 	// Active AI cards: channelId → AICard
 	private activeCards = new Map<string, AICard>();
@@ -629,6 +630,16 @@ export class DingTalkBot {
 			return this.accessToken;
 		}
 
+		// Coalesce concurrent refresh requests into a single HTTP call
+		if (!this.tokenRefreshPromise) {
+			this.tokenRefreshPromise = this.refreshAccessToken().finally(() => {
+				this.tokenRefreshPromise = null;
+			});
+		}
+		return this.tokenRefreshPromise;
+	}
+
+	private async refreshAccessToken(): Promise<string | null> {
 		try {
 			const resp = await axios.post(
 				`${DINGTALK_API}/v1.0/oauth2/accessToken`,

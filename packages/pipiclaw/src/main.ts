@@ -35,8 +35,6 @@ if (process.env.DINGTALK_FORCE_PROXY !== "true") {
 	delete process.env.ALL_PROXY;
 }
 
-interface DingTalkAppConfig extends DingTalkConfig {}
-
 interface ParsedArgs {
 	sandbox: SandboxConfig;
 }
@@ -104,7 +102,7 @@ const CHANNEL_CONFIG_TEMPLATE = {
 	cardTemplateId: "your-card-template-id",
 	cardTemplateKey: "content",
 	allowFrom: ["your-staff-id"],
-} satisfies DingTalkAppConfig;
+} satisfies DingTalkConfig;
 
 const MODELS_CONFIG_TEMPLATE = { providers: {} };
 
@@ -162,7 +160,7 @@ function isPlaceholderString(value: string): boolean {
 	return value.trim().startsWith("your-");
 }
 
-function listChannelConfigIssues(config: Partial<DingTalkAppConfig>): string[] {
+function listChannelConfigIssues(config: Partial<DingTalkConfig>): string[] {
 	const issues: string[] = [];
 
 	if (!config.clientId) {
@@ -206,11 +204,11 @@ function printBootstrapSummary(result: BootstrapResult): void {
 	console.log("");
 }
 
-function loadConfig(): DingTalkAppConfig {
-	let parsed: DingTalkAppConfig;
+function loadConfig(): DingTalkConfig {
+	let parsed: DingTalkConfig;
 
 	try {
-		parsed = JSON.parse(readFileSync(CHANNEL_CONFIG_PATH, "utf-8")) as DingTalkAppConfig;
+		parsed = JSON.parse(readFileSync(CHANNEL_CONFIG_PATH, "utf-8")) as DingTalkConfig;
 	} catch (err) {
 		console.error(`Failed to parse configuration: ${CHANNEL_CONFIG_PATH}`);
 		console.error(err instanceof Error ? err.message : String(err));
@@ -365,7 +363,7 @@ const handler: DingTalkHandler = {
 		state.running = true;
 		state.stopRequested = false;
 
-		state.store.logMessage(event.channelId, {
+		await state.store.logMessage(event.channelId, {
 			date: new Date().toISOString(),
 			ts: event.ts,
 			user: event.user,

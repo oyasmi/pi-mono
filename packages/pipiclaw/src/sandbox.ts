@@ -10,7 +10,7 @@ export function parseSandboxArg(value: string): SandboxConfig {
 	if (value.startsWith("docker:")) {
 		const container = value.slice("docker:".length);
 		if (!container) {
-			console.error("Error: docker sandbox requires container name (e.g., docker:mom-sandbox)");
+			console.error("Error: docker sandbox requires container name (e.g., docker:pipiclaw-sandbox)");
 			process.exit(1);
 		}
 		return { type: "docker", container };
