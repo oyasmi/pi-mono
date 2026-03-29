@@ -62,7 +62,7 @@ Example topics you may want to define:
 Replace this template with your actual identity prompt.
 `;
 
-const DEFAULT_AGENT = `# AGENT.md
+const DEFAULT_AGENT = `# AGENTS.md
 
 Configure Pipiclaw's behavioral rules and operating constraints here.
 
@@ -136,7 +136,7 @@ function bootstrapAppHome(): BootstrapResult {
 	}
 
 	writeTextFileIfMissing(join(WORKSPACE_DIR, "SOUL.md"), DEFAULT_SOUL, "workspace/SOUL.md", created);
-	writeTextFileIfMissing(join(WORKSPACE_DIR, "AGENT.md"), DEFAULT_AGENT, "workspace/AGENT.md", created);
+	writeTextFileIfMissing(join(WORKSPACE_DIR, "AGENTS.md"), DEFAULT_AGENT, "workspace/AGENTS.md", created);
 	writeTextFileIfMissing(join(WORKSPACE_DIR, "MEMORY.md"), DEFAULT_MEMORY, "workspace/MEMORY.md", created);
 
 	const channelTemplateCreated = writeJsonFileIfMissing(

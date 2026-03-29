@@ -8,7 +8,7 @@ Pipiclaw 是一个接入钉钉的 AI Card 机器人，把 [pi-coding-agent](../c
 - 过程性思考和执行信息通过 AI Card 展示，最终答复独立快速返回
 - 内置 Slash 命令：`/help`、`/new`、`/compact`、`/session`、`/model`
 - 每个 DM / 群聊独立工作空间
-- 支持全局和频道级 `SOUL.md`、`AGENT.md`、`MEMORY.md`
+- 支持全局和频道级 `SOUL.md`、`AGENTS.md`、`MEMORY.md`
 - 支持全局和频道级技能目录
 - 支持 immediate / one-shot / periodic 定时事件
 - 支持自定义模型配置和模型切换
@@ -35,7 +35,7 @@ pipiclaw
 - `workspace/events/`
 - `workspace/skills/`
 - `workspace/SOUL.md`
-- `workspace/AGENT.md`
+- `workspace/AGENTS.md`
 - `workspace/MEMORY.md`
 
 如果 `channel.json` 还是示例占位符，程序会提示你先填写真实配置，然后退出。
@@ -158,15 +158,50 @@ pipiclaw --sandbox=docker:your-container
 - `/model <ref>` 只支持精确匹配
 - 未被 Pipiclaw 拦截的其他 slash 输入，仍会按 `AgentSession.prompt()` 的原有逻辑处理
 
-### SOUL.md / AGENT.md / MEMORY.md
+## Workspace Files
 
-首次运行生成的 `SOUL.md` 和 `AGENT.md` 只是说明模板，不是实际配置。
+Pipiclaw 只会自动识别并使用下面这些 workspace 文件或目录：
 
-- `SOUL.md` 用来定义身份、语气、默认语言和回复风格
-- `AGENT.md` 用来定义行为规则、工具使用策略和安全约束
-- `MEMORY.md` 用来记录长期记忆
+- `SOUL.md`
+- `AGENTS.md`
+- `MEMORY.md`
+- `skills/`
+- `events/`
 
-你需要根据自己的实际使用场景，把 `SOUL.md` 和 `AGENT.md` 改成真正的内容。
+`TOOLS.md` 当前不受支持。即使你手工创建了它，也不会被自动加载或生效。
+
+### Global And Channel Scope
+
+Pipiclaw 同时支持：
+
+- 全局 workspace 文件：`~/.pi/pipiclaw/workspace/`
+- 渠道级文件：`~/.pi/pipiclaw/workspace/dm_xxxx/` 或 `group_xxxx/`
+
+它们的关系如下：
+
+| 名称 | 全局位置 | 渠道级位置 | 生效方式 |
+|------|----------|------------|----------|
+| `SOUL.md` | `workspace/SOUL.md` | 不支持 | 仅使用全局文件。渠道级 `SOUL.md` 不会被读取。 |
+| `AGENTS.md` | `workspace/AGENTS.md` | `<channel>/AGENTS.md` | 叠加。先读取全局，再追加渠道级，不是替换。 |
+| `MEMORY.md` | `workspace/MEMORY.md` | `<channel>/MEMORY.md` | 合并。全局记忆和渠道记忆都会一起进入上下文。 |
+| `skills/` | `workspace/skills/` | `<channel>/skills/` | 合并。两边的技能都会加载；如果同名，渠道级覆盖全局。 |
+| `events/` | `workspace/events/` | 不支持 | 仅支持全局事件目录。 |
+| `.channel-meta.json` | 不支持 | `<channel>/.channel-meta.json` | 运行时自动维护，用于主动发送和重启恢复，不建议手工编辑。 |
+| `context.jsonl` | 不支持 | `<channel>/context.jsonl` | 运行时自动维护，保存结构化上下文。 |
+| `log.jsonl` | 不支持 | `<channel>/log.jsonl` | 运行时自动维护，保存消息历史。 |
+
+### File Intent
+
+- `SOUL.md`
+  定义 Pipiclaw 的身份、语气、默认语言和回复风格。首次运行生成的只是说明模板，你需要替换成真实内容。
+- `AGENTS.md`
+  定义行为规则、工具使用策略、安全约束和项目工作流。全局文件定义通用规则，渠道级文件补充该渠道的特定规则。
+- `MEMORY.md`
+  定义持久记忆。适合存长期偏好、项目背景、联系人信息、长期约束等。
+- `skills/`
+  存放自定义技能。适合放可复用的 CLI 工具、脚本和 skill 说明。
+- `events/`
+  存放定时事件定义。只支持全局目录，不支持放到单个 channel 目录里。
 
 ## 工作空间布局
 
@@ -178,12 +213,12 @@ pipiclaw --sandbox=docker:your-container
 ├── settings.json
 └── workspace/
     ├── SOUL.md
-    ├── AGENT.md
+    ├── AGENTS.md
     ├── MEMORY.md
     ├── skills/
     ├── events/
     └── dm_{userId}/
-        ├── AGENT.md
+        ├── AGENTS.md
         ├── MEMORY.md
         ├── .channel-meta.json
         ├── context.jsonl

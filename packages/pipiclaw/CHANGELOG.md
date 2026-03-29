@@ -27,6 +27,6 @@
 - Conversation metadata is persisted per channel so scheduled events and proactive sends continue to work after process restarts
 - Package, CLI, and data directory renamed to `pipiclaw`, `@oyasmi/pipiclaw`, and `~/.pi/pipiclaw/`
 - Pipiclaw now bootstraps `channel.json`, `auth.json`, `models.json`, `settings.json`, and the workspace skeleton automatically on first start
-- Auto-generated `models.json` now starts as an empty valid config, and `SOUL.md` / `AGENT.md` are guidance templates instead of prefilled behavior
+- Auto-generated `models.json` now starts as an empty valid config, and `SOUL.md` / `AGENTS.md` are guidance templates instead of prefilled behavior
 - Global pipiclaw settings now live in `~/.pi/pipiclaw/settings.json`, and saved default models are restored on restart
 - DingTalk channel configuration is now read from `~/.pi/pipiclaw/channel.json`

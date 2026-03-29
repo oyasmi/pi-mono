@@ -152,7 +152,7 @@ async function getApiKeyForModel(modelRegistry: ModelRegistry, model: any): Prom
 }
 
 // ============================================================================
-// Configuration file loaders: SOUL.md, AGENT.md, MEMORY.md
+// Configuration file loaders: SOUL.md, AGENTS.md, MEMORY.md
 // ============================================================================
 
 /**
@@ -173,14 +173,14 @@ function getSoul(workspaceDir: string): string {
 }
 
 /**
- * Load AGENT.md — defines the agent's behavior instructions, capabilities, and constraints.
+ * Load AGENTS.md — defines the agent's behavior instructions, capabilities, and constraints.
  * Supports both global (workspace root) and channel-level override.
  */
 function getAgentConfig(channelDir: string): string {
 	const parts: string[] = [];
 
-	// Read workspace-level AGENT.md (global)
-	const workspaceAgentPath = join(channelDir, "..", "AGENT.md");
+	// Read workspace-level AGENTS.md (global)
+	const workspaceAgentPath = join(channelDir, "..", "AGENTS.md");
 	if (existsSync(workspaceAgentPath)) {
 		try {
 			const content = readFileSync(workspaceAgentPath, "utf-8").trim();
@@ -188,12 +188,12 @@ function getAgentConfig(channelDir: string): string {
 				parts.push(content);
 			}
 		} catch (error) {
-			log.logWarning("Failed to read workspace AGENT.md", `${workspaceAgentPath}: ${error}`);
+			log.logWarning("Failed to read workspace AGENTS.md", `${workspaceAgentPath}: ${error}`);
 		}
 	}
 
-	// Read channel-specific AGENT.md (overrides/extends global)
-	const channelAgentPath = join(channelDir, "AGENT.md");
+	// Read channel-specific AGENTS.md (overrides/extends global)
+	const channelAgentPath = join(channelDir, "AGENTS.md");
 	if (existsSync(channelAgentPath)) {
 		try {
 			const content = readFileSync(channelAgentPath, "utf-8").trim();
@@ -201,7 +201,7 @@ function getAgentConfig(channelDir: string): string {
 				parts.push(content);
 			}
 		} catch (error) {
-			log.logWarning("Failed to read channel AGENT.md", `${channelAgentPath}: ${error}`);
+			log.logWarning("Failed to read channel AGENTS.md", `${channelAgentPath}: ${error}`);
 		}
 	}
 
@@ -309,7 +309,7 @@ function buildSystemPrompt(
 	// Build system prompt with configuration file layering:
 	// 1. SOUL.md (identity/personality)
 	// 2. Core instructions
-	// 3. AGENT.md (behavior instructions)
+	// 3. AGENTS.md (behavior instructions)
 	// 4. Skills, Events, Memory
 
 	const sections: string[] = [];
@@ -337,18 +337,18 @@ ${envDescription}
 ## Workspace Layout
 ${workspacePath}/
 ├── SOUL.md                      # Your identity/personality (read-only)
-├── AGENT.md                     # Custom behavior instructions (read-only)
+├── AGENTS.md                    # Custom behavior instructions (read-only)
 ├── MEMORY.md                    # Global memory (all channels, you can read/write)
 ├── skills/                      # Global CLI tools you create
 ├── events/                      # Scheduled events
 └── ${channelId}/                # This channel
-    ├── AGENT.md                 # Channel-specific instructions (read-only)
+    ├── AGENTS.md                # Channel-specific instructions (read-only)
     ├── MEMORY.md                # Channel-specific memory (you can read/write)
     ├── log.jsonl                # Message history (no tool results)
     ├── scratch/                 # Your working directory
     └── skills/                  # Channel-specific tools`);
 
-	// 3. AGENT.md — User-defined instructions
+	// 3. AGENTS.md — User-defined instructions
 	if (agentConfig) {
 		sections.push(`## Agent Instructions\n${agentConfig}`);
 	}
