@@ -1,15 +1,27 @@
-import { existsSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { mkdir, readFile, rename, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 
 const DEFAULT_CHANNEL_MEMORY = `# Channel Memory
 
-<!-- Runtime-managed channel memory. The agent may read this file on demand. -->
+This file stores durable channel-specific memory.
+
+- It is not preloaded into session context.
+- Read it on demand when prior decisions, preferences, or long-running work matter.
+- The runtime may append updates here during consolidation.
+
+## Durable Facts
+
+<!-- Stable facts, preferences, and ongoing commitments can accumulate here. -->
 `;
 
 const DEFAULT_CHANNEL_HISTORY = `# Channel History
 
-<!-- Runtime-managed summarized history. The agent may read this file on demand. -->
+This file stores summarized older channel history.
+
+- It is not preloaded into session context.
+- Read it on demand when older context matters.
+- The runtime may append and fold history blocks here during consolidation.
 `;
 
 export interface MemoryUpdateBlock {
@@ -46,16 +58,20 @@ export function getChannelHistoryPath(channelDir: string): string {
 }
 
 export async function ensureChannelMemoryFiles(channelDir: string): Promise<void> {
+	ensureChannelMemoryFilesSync(channelDir);
+}
+
+export function ensureChannelMemoryFilesSync(channelDir: string): void {
 	const memoryPath = getChannelMemoryPath(channelDir);
 	const historyPath = getChannelHistoryPath(channelDir);
 
-	await mkdir(channelDir, { recursive: true });
+	mkdirSync(channelDir, { recursive: true });
 
 	if (!existsSync(memoryPath)) {
-		await writeAtomically(memoryPath, DEFAULT_CHANNEL_MEMORY);
+		writeFileSync(memoryPath, DEFAULT_CHANNEL_MEMORY, "utf-8");
 	}
 	if (!existsSync(historyPath)) {
-		await writeAtomically(historyPath, DEFAULT_CHANNEL_HISTORY);
+		writeFileSync(historyPath, DEFAULT_CHANNEL_HISTORY, "utf-8");
 	}
 }
 

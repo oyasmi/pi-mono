@@ -14,6 +14,7 @@ import {
 } from "./dingtalk.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
+import { ensureChannelMemoryFilesSync } from "./memory-files.js";
 import {
 	APP_HOME_DIR,
 	APP_NAME,
@@ -68,35 +69,41 @@ Replace this template with your actual identity prompt.
 
 const DEFAULT_AGENT = `# AGENTS.md
 
-Configure Pipiclaw's behavioral rules and operating constraints here.
+Configure Pipiclaw's operating rules here.
+
+This file should define behavior and workflow. Identity, tone, and personality belong in \`SOUL.md\`.
 
 Suggested sections:
 
 - Tool usage policy
-- File access rules
 - Security constraints
-- Approval rules
+- Scheduling/reminder policy
 - Project-specific workflows
 - Things the assistant must always or never do
-
-Example topics you may want to define:
-
-- Which tools should be preferred first
-- Whether installation commands are allowed
-- How to handle sensitive data
-- Coding conventions for your team
-- Deployment or release restrictions
 
 Replace this template with your actual operating instructions.
 `;
 
 const DEFAULT_MEMORY = `# Workspace Memory
 
-This file is stable workspace-level memory.
+This file stores stable workspace-level memory.
 
 - It is intended to be managed by a human administrator.
-- Pipiclaw does not automatically rewrite this file during normal memory consolidation.
+- It is not automatically rewritten by normal runtime consolidation.
 - Store durable shared background here when it should apply across channels.
+- Keep this file focused on stable facts, policies, and shared context, not transient conversation history.
+
+## Shared Context
+
+<!-- Put team-wide or workspace-wide background here. -->
+
+## Tooling And Environment
+
+<!-- Put durable tool usage rules, environment assumptions, or shared operational conventions here. -->
+
+## Project Notes
+
+<!-- Put long-lived project facts here. -->
 `;
 
 const CHANNEL_CONFIG_TEMPLATE = {
@@ -293,6 +300,7 @@ function getState(channelId: string): ChannelState {
 	let state = channelStates.get(channelId);
 	if (!state) {
 		const channelDir = join(WORKSPACE_DIR, channelId);
+		ensureChannelMemoryFilesSync(channelDir);
 		state = {
 			running: false,
 			runner: getOrCreateRunner(sandbox, channelId, channelDir),

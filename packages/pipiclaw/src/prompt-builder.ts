@@ -73,11 +73,8 @@ You can schedule events that wake you up at specific times or when external thin
 \`minute hour day-of-month month day-of-week\`
 
 ### Creating Events
-\`\`\`bash
-cat > ${workspacePath}/events/reminder-$(date +%s).json << 'EOF'
-{"type": "one-shot", "channelId": "${channelId}", "text": "Reminder text", "at": "2025-12-14T09:00:00+08:00"}
-EOF
-\`\`\`
+Create a JSON file under \`${workspacePath}/events/\` with the appropriate event payload.
+Prefer the file tools for creating or editing the event file. Use shell commands only when they are the clearest option.
 
 ### Silent Completion
 For periodic events where there's nothing to report, respond with just \`[SILENT]\`. This deletes the status message. Use this to avoid spam when periodic checks find nothing.
@@ -97,9 +94,8 @@ Memory files are not preloaded into session context. Read them explicitly when m
   Summarized older channel history. Runtime-managed. Read on demand. Do not maintain this file manually during normal work.
 
 ### Runtime Behavior
-- The runtime automatically consolidates channel memory before compaction or session trimming.
-- Consolidation updates channel MEMORY.md and HISTORY.md.
-- Workspace MEMORY.md is not automatically updated by the runtime.
+- The runtime automatically consolidates channel MEMORY.md and HISTORY.md before compaction or session trimming.
+- Workspace MEMORY.md is not updated by normal runtime consolidation.
 
 ### Cold Storage
 - ${channelPath}/log.jsonl is a raw archive. It is not normal memory and is not proactively loaded.
@@ -117,10 +113,10 @@ Maintain ${workspacePath}/SYSTEM.md to log all environment modifications:
 Update this file whenever you modify the environment.`);
 
 	sections.push(`## Tools
-- bash: Run shell commands (primary tool). Install packages as needed.
 - read: Read files
-- write: Create/overwrite files
 - edit: Surgical file edits
+- write: Create or overwrite files when needed
+- bash: Run shell commands and external programs
 
 Each tool requires a "label" parameter (shown to user).`);
 

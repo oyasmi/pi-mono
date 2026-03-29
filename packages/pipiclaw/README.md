@@ -146,7 +146,10 @@ pipiclaw --sandbox=docker:your-container
 
 ## 内置 Slash 命令
 
-以下命令由 Pipiclaw 直接处理，不会作为普通 prompt 发送给模型。
+Pipiclaw 暴露两层命令：
+
+- transport 层命令：由 DingTalk runtime 直接处理
+- session 层命令：由 `AgentSession` extension command 立即执行，不作为普通 prompt 发给模型
 
 ### 空闲时可用
 
@@ -184,7 +187,7 @@ pipiclaw --sandbox=docker:your-container
 - busy 时普通消息默认等价于 `/steer <message>`
 - `/steer` 更适合纠偏、补充限制条件、修改当前任务方向
 - `/followup` 更适合“等这件事做完，再继续做下一件事”
-- 未被 Pipiclaw 拦截的其他 slash 输入，仍会按 `AgentSession.prompt()` 的原有逻辑处理
+- busy 时，其他 slash 输入不会执行；只允许 `/help`、`/stop`、`/steer`、`/followup`
 
 ## Workspace Files
 
@@ -193,7 +196,6 @@ Pipiclaw 只会自动识别并使用下面这些 workspace 文件或目录：
 - `SOUL.md`
 - `AGENTS.md`
 - `MEMORY.md`
-- `HISTORY.md`
 - `skills/`
 - `events/`
 
@@ -223,9 +225,9 @@ Pipiclaw 同时支持：
 ### File Intent
 
 - `SOUL.md`
-  定义 Pipiclaw 的身份、语气、默认语言和回复风格。首次运行生成的只是说明模板，你需要替换成真实内容。
+  定义 Pipiclaw 的身份、语气、默认语言和回复风格。它会追加到 pi 默认底座 prompt 之后。首次运行生成的只是说明模板，你需要替换成真实内容。
 - `AGENTS.md`
-  定义行为规则、工具使用策略、安全约束和项目工作流。只读取 workspace 级文件。
+  定义行为规则、工具使用策略、安全约束和项目工作流。只读取 workspace 级文件。不要把 runtime 内建的记忆系统细节完整复制到这里。
 - `MEMORY.md`
   定义持久记忆。workspace 级文件适合存稳定共享背景，由管理员维护；channel 级文件适合存 durable facts、ongoing work、decisions、open loops，并由 runtime consolidation 自动维护。
 - `HISTORY.md`
@@ -262,6 +264,7 @@ Pipiclaw 同时支持：
 
 Pipiclaw 的默认 session 上下文只直接加载这些内容：
 
+- pi 默认底座 system prompt
 - workspace 级 `SOUL.md`
 - workspace 级 `AGENTS.md`
 - 内置工具说明
@@ -281,6 +284,7 @@ Pipiclaw 的默认 session 上下文只直接加载这些内容：
 - `<channel>/MEMORY.md` 和 `<channel>/HISTORY.md` 由 runtime 在 compaction 或 session trimming 前自动 consolidation。
 - agent 被鼓励在需要时主动读取 channel memory/history。
 - `log.jsonl` 和 `context.jsonl` 是冷存储，只做原始归档，不承担记忆角色。
+- channel 目录首次初始化时会立即创建 `MEMORY.md` 和 `HISTORY.md`，而不是等到首次 consolidation 再懒创建。
 
 ## 定时事件
 
@@ -314,6 +318,5 @@ Pipiclaw 的默认 session 上下文只直接加载这些内容：
 
 ```bash
 npm install
-npm run build
-npm run dev
+npm run check
 ```

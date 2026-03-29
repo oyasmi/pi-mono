@@ -198,6 +198,7 @@ class ChannelRunner implements AgentRunner {
 	private readonly settingsManager: PipiclawSettingsManager;
 	private readonly modelRegistry: ModelRegistry;
 	private readonly memoryLifecycle: MemoryLifecycle;
+	private readonly sessionReady: Promise<void>;
 
 	// --- Mutable across runs ---
 	private activeModel: Model<Api>;
@@ -279,17 +280,15 @@ class ChannelRunner implements AgentRunner {
 					},
 				}),
 			],
-			systemPromptOverride: (base) => {
+			appendSystemPromptOverride: (base) => {
 				const soul = getSoul(this.workspaceDir);
-				if (!soul) {
-					return base;
+				const sections = [...base];
+				if (soul) {
+					sections.unshift(soul);
 				}
-				return base ? `${soul}\n\n${base}` : soul;
+				sections.push(buildAppendSystemPrompt(this.workspacePath, this.channelId, this.sandboxConfig));
+				return sections;
 			},
-			appendSystemPromptOverride: (base) => [
-				...base,
-				buildAppendSystemPrompt(this.workspacePath, this.channelId, this.sandboxConfig),
-			],
 			agentsFilesOverride: () => {
 				const agentConfig = getAgentConfig(this.channelDir);
 				return {
@@ -317,6 +316,7 @@ class ChannelRunner implements AgentRunner {
 
 		// Subscribe to session events
 		this.subscribeToSessionEvents();
+		this.sessionReady = this.initializeSession();
 	}
 
 	// === Public API ===
@@ -346,6 +346,8 @@ class ChannelRunner implements AgentRunner {
 		};
 
 		try {
+			await this.ensureSessionReady();
+
 			// Ensure channel directory exists
 			await mkdir(this.channelDir, { recursive: true });
 
@@ -531,9 +533,20 @@ class ChannelRunner implements AgentRunner {
 	}
 
 	private async refreshSessionResources(): Promise<void> {
+		await this.ensureSessionReady();
 		const skills = loadPipiclawSkills(this.channelDir, this.workspacePath);
 		this.currentSkills = skills;
 		await this.session.reload();
+	}
+
+	private async initializeSession(): Promise<void> {
+		const skills = loadPipiclawSkills(this.channelDir, this.workspacePath);
+		this.currentSkills = skills;
+		await this.session.reload();
+	}
+
+	private async ensureSessionReady(): Promise<void> {
+		await this.sessionReady;
 	}
 
 	// === Session event subscription ===

@@ -36,4 +36,9 @@
 - Workspace `SOUL.md` and `AGENTS.md` now load only at session start instead of every turn
 - Workspace and channel memory files are no longer injected into the system prompt by default
 - `log.jsonl` and `context.jsonl` are now treated as cold raw storage and are no longer proactively scanned for memory/context loading
-- Auto-compaction is disabled in pipiclaw runtime; memory consolidation now runs before manual compaction or session trimming
+- Channel memory consolidation now hooks into AgentSession compaction and session-switch lifecycle without replacing AgentSession auto-compaction
+- Session commands and prompt loading now run through pi extension/resource hooks instead of parallel pipiclaw-specific prompt plumbing
+- Pipiclaw now reloads AgentSession resources before the first turn so `SOUL.md`, `AGENTS.md`, and skill summaries apply immediately
+- Workspace `SOUL.md` now appends to the default pi system prompt instead of replacing the pi base prompt
+- Channel directories now create `MEMORY.md` and `HISTORY.md` immediately when the channel state is initialized
+- Workspace and channel memory templates are now structured around stable shared context instead of placeholder comments only
