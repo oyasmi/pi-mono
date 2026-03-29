@@ -341,9 +341,9 @@ const handler: DingTalkHandler = {
 
 		try {
 			if (mode === "followUp") {
-				await state.runner.queueFollowUp(trimmedQueueText);
+				await state.runner.queueFollowUp(trimmedQueueText, event.userName);
 			} else {
-				await state.runner.queueSteer(trimmedQueueText);
+				await state.runner.queueSteer(trimmedQueueText, event.userName);
 			}
 
 			const confirmation =

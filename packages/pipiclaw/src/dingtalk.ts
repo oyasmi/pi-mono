@@ -738,6 +738,7 @@ export class DingTalkBot {
 		};
 
 		const builtInCommand = parseBuiltInCommand(content);
+		const isSlashCommand = content.trim().startsWith("/");
 
 		// Check if busy
 		if (this.handler.isRunning(channelId)) {
@@ -766,6 +767,14 @@ export class DingTalkBot {
 				await this.sendPlain(
 					channelId,
 					"A task is already running. Use `/stop`, `/steer <message>`, or `/followup <message>`. Plain messages default to steer.",
+				);
+				return;
+			}
+
+			if (isSlashCommand) {
+				await this.sendPlain(
+					channelId,
+					"A task is already running. Only `/stop`, `/steer <message>`, and `/followup <message>` are available while streaming.",
 				);
 				return;
 			}

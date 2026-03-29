@@ -1,4 +1,4 @@
-export type BuiltInCommandName = "help" | "new" | "compact" | "session" | "model" | "steer" | "followup" | "stop";
+export type BuiltInCommandName = "help" | "steer" | "followup" | "stop";
 
 export interface BuiltInCommand {
 	name: BuiltInCommandName;
@@ -8,29 +8,11 @@ export interface BuiltInCommand {
 
 const HELP_TEXT = `# Slash Commands
 
-The following slash commands are supported:
+Pipiclaw supports two command groups.
 
-## Available When Idle
+## Transport Commands
 
-- \`/help\`
-  Show command help
-  Example: \`/help\`
-- \`/new\`
-  Start a new session
-  Example: \`/new\`
-- \`/compact [instructions]\`
-  Manually compact the current session context, with optional custom instructions
-  Example: \`/compact\`
-  Example: \`/compact Keep the latest TODOs and decisions\`
-- \`/session\`
-  Show current session state, message stats, token usage, and model info
-  Example: \`/session\`
-- \`/model [provider/modelId|modelId]\`
-  Show the current model, or switch models using an exact match
-  Example: \`/model\`
-  Example: \`/model anthropic/claude-opus-4-6\`
-
-## Available While A Task Is Running
+These are handled directly by the DingTalk transport/runtime layer.
 
 - \`/help\`
   Show command help
@@ -46,6 +28,25 @@ The following slash commands are supported:
   Example: \`/followup After that, draft a short executive summary\`
 
 While a task is running, a plain message is treated as \`steer\` by default.
+
+## Session Commands
+
+These are handled inside the Pipiclaw session layer:
+
+- \`/session\`
+  Show current session state, message stats, token usage, and model info
+  Example: \`/session\`
+- \`/model [provider/modelId|modelId]\`
+  Show the current model, or switch models using an exact match
+  Example: \`/model\`
+  Example: \`/model anthropic/claude-opus-4-6\`
+- \`/new\`
+  Start a new session
+  Example: \`/new\`
+- \`/compact [instructions]\`
+  Manually compact the current session context, with optional custom instructions
+  Example: \`/compact\`
+  Example: \`/compact Keep the latest TODOs and decisions\`
 `;
 
 export function parseBuiltInCommand(text: string): BuiltInCommand | null {
@@ -60,10 +61,6 @@ export function parseBuiltInCommand(text: string): BuiltInCommand | null {
 
 	switch (rawName) {
 		case "help":
-		case "new":
-		case "compact":
-		case "session":
-		case "model":
 		case "steer":
 		case "followup":
 		case "stop":

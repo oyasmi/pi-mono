@@ -1,13 +1,9 @@
-import { formatSkillsForPrompt, type Skill } from "@mariozechner/pi-coding-agent";
 import type { SandboxConfig } from "./sandbox.js";
 
-export function buildSystemPrompt(
+export function buildAppendSystemPrompt(
 	workspacePath: string,
 	channelId: string,
-	soul: string,
-	agentConfig: string,
 	sandboxConfig: SandboxConfig,
-	skills: Skill[],
 ): string {
 	const channelPath = `${workspacePath}/${channelId}`;
 	const isDocker = sandboxConfig.type === "docker";
@@ -21,23 +17,12 @@ export function buildSystemPrompt(
 - Bash working directory: ${process.cwd()}
 - Be careful with system modifications`;
 
-	// Build system prompt with configuration file layering:
-	// 1. SOUL.md (identity/personality)
-	// 2. Core instructions
-	// 3. AGENTS.md (behavior instructions)
-	// 4. Skills, Events, Memory
-
 	const sections: string[] = [];
 
-	// 1. SOUL.md — Agent identity
-	if (soul) {
-		sections.push(soul);
-	} else {
-		sections.push("You are a DingTalk bot assistant. Be concise and helpful.");
-	}
+	sections.push(`## Pipiclaw Runtime
+You are running inside Pipiclaw, a DingTalk-oriented runtime built on top of pi.
 
-	// 2. Core instructions
-	sections.push(`## Context
+## Context
 - For current date/time, use: date
 - You have access to the active session context for this session.
 - Raw transcript files are cold storage. Do not assume they are preloaded.
@@ -64,37 +49,6 @@ ${workspacePath}/
     ├── scratch/                 # Your working directory
     └── skills/                  # Channel-specific tools`);
 
-	// 3. AGENTS.md — User-defined instructions
-	if (agentConfig) {
-		sections.push(`## Agent Instructions\n${agentConfig}`);
-	}
-
-	// 4. Skills
-	sections.push(`## Skills (Custom CLI Tools)
-You can create reusable CLI tools for recurring tasks (email, APIs, data processing, etc.).
-
-### Creating Skills
-Store in \`${workspacePath}/skills/<name>/\` (global) or \`${channelPath}/skills/<name>/\` (channel-specific).
-Each skill directory needs a \`SKILL.md\` with YAML frontmatter:
-
-\`\`\`markdown
----
-name: skill-name
-description: Short description of what this skill does
----
-
-# Skill Name
-
-Usage instructions, examples, etc.
-Scripts are in: {baseDir}/
-\`\`\`
-
-\`name\` and \`description\` are required. Use \`{baseDir}\` as placeholder for the skill's directory path.
-
-### Available Skills
-${skills.length > 0 ? formatSkillsForPrompt(skills) : "(no skills installed yet)"}`);
-
-	// 5. Events
 	sections.push(`## Events
 You can schedule events that wake you up at specific times or when external things happen. Events are JSON files in \`${workspacePath}/events/\`.
 
@@ -131,7 +85,6 @@ For periodic events where there's nothing to report, respond with just \`[SILENT
 ### Limits
 Maximum 5 events can be queued.`);
 
-	// 6. Memory
 	sections.push(`## Memory
 Memory files are not preloaded into session context. Read them explicitly when memory or history matters.
 
@@ -154,7 +107,6 @@ Memory files are not preloaded into session context. Read them explicitly when m
 
 When a task depends on prior decisions, preferences, or long-running work, read channel MEMORY.md and HISTORY.md first.`);
 
-	// 7. System Configuration Log
 	sections.push(`## System Configuration Log
 Maintain ${workspacePath}/SYSTEM.md to log all environment modifications:
 - Installed packages (apk add, npm install, pip install)
@@ -164,7 +116,6 @@ Maintain ${workspacePath}/SYSTEM.md to log all environment modifications:
 
 Update this file whenever you modify the environment.`);
 
-	// 8. Tools
 	sections.push(`## Tools
 - bash: Run shell commands (primary tool). Install packages as needed.
 - read: Read files

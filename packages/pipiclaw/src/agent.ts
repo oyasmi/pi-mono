@@ -10,21 +10,17 @@ import {
 	type Skill,
 } from "@mariozechner/pi-coding-agent";
 import { mkdir, writeFile } from "fs/promises";
-import { basename, join } from "path";
+import { join } from "path";
+import { COMMAND_RESULT_CUSTOM_TYPE, createCommandExtension } from "./command-extension.js";
 import { type BuiltInCommand, renderBuiltInHelp } from "./commands.js";
 import { getAgentConfig, getApiKeyForModel, getSoul, loadPipiclawSkills } from "./config-loader.js";
 import { PipiclawSettingsManager } from "./context.js";
 import type { DingTalkContext } from "./dingtalk.js";
 import * as log from "./log.js";
 import { MemoryLifecycle } from "./memory-lifecycle.js";
-import {
-	findExactModelReferenceMatch,
-	formatModelList,
-	formatModelReference,
-	resolveInitialModel,
-} from "./model-utils.js";
+import { resolveInitialModel } from "./model-utils.js";
 import { APP_HOME_DIR, AUTH_CONFIG_PATH, MODELS_CONFIG_PATH } from "./paths.js";
-import { buildSystemPrompt } from "./prompt-builder.js";
+import { buildAppendSystemPrompt } from "./prompt-builder.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelStore } from "./store.js";
 import { createPipiclawTools } from "./tools/index.js";
@@ -36,8 +32,8 @@ import { createPipiclawTools } from "./tools/index.js";
 export interface AgentRunner {
 	run(ctx: DingTalkContext, store: ChannelStore): Promise<{ stopReason: string; errorMessage?: string }>;
 	handleBuiltinCommand(ctx: DingTalkContext, command: BuiltInCommand): Promise<void>;
-	queueSteer(text: string): Promise<void>;
-	queueFollowUp(text: string): Promise<void>;
+	queueSteer(text: string, userName?: string): Promise<void>;
+	queueFollowUp(text: string, userName?: string): Promise<void>;
 	abort(): void;
 }
 
@@ -112,6 +108,22 @@ function extractToolResultText(result: unknown): string {
 	}
 
 	return JSON.stringify(result);
+}
+
+function extractCustomCommandResultText(message: unknown): string | null {
+	if (
+		!message ||
+		typeof message !== "object" ||
+		!("role" in message) ||
+		!("customType" in message) ||
+		(message as { role?: unknown }).role !== "custom" ||
+		(message as { customType?: unknown }).customType !== COMMAND_RESULT_CUSTOM_TYPE
+	) {
+		return null;
+	}
+
+	const content = (message as { content?: unknown }).content;
+	return typeof content === "string" && content.trim() ? content : null;
 }
 
 // ============================================================================
@@ -206,10 +218,9 @@ class ChannelRunner implements AgentRunner {
 		// Create tools
 		const tools = createPipiclawTools(executor);
 
-		// Initial session prompt and skill summaries
+		// Initial skill summaries
 		const initialSkills = loadPipiclawSkills(channelDir, this.workspacePath);
 		this.currentSkills = initialSkills;
-		const systemPrompt = this.buildSessionStartPrompt(initialSkills);
 
 		// Create session manager
 		const contextFile = join(channelDir, "context.jsonl");
@@ -227,7 +238,7 @@ class ChannelRunner implements AgentRunner {
 		// Create agent
 		this.agent = new Agent({
 			initialState: {
-				systemPrompt,
+				systemPrompt: "",
 				model: this.activeModel,
 				thinkingLevel: "off",
 				tools,
@@ -249,7 +260,42 @@ class ChannelRunner implements AgentRunner {
 			cwd: process.cwd(),
 			agentDir: APP_HOME_DIR,
 			settingsManager: this.settingsManager as any,
-			extensionFactories: [this.memoryLifecycle.createExtensionFactory()],
+			extensionFactories: [
+				this.memoryLifecycle.createExtensionFactory(),
+				createCommandExtension({
+					getCurrentModel: () => this.session.model ?? this.activeModel,
+					getAvailableModels: async () => {
+						this.modelRegistry.refresh();
+						return await this.modelRegistry.getAvailable();
+					},
+					getSessionStats: () => this.session.getSessionStats(),
+					getThinkingLevel: () => this.session.thinkingLevel,
+					switchModel: async (model) => {
+						await this.session.setModel(model);
+						this.activeModel = model;
+					},
+					refreshSessionResources: async () => {
+						await this.refreshSessionResources();
+					},
+				}),
+			],
+			systemPromptOverride: (base) => {
+				const soul = getSoul(this.workspaceDir);
+				if (!soul) {
+					return base;
+				}
+				return base ? `${soul}\n\n${base}` : soul;
+			},
+			appendSystemPromptOverride: (base) => [
+				...base,
+				buildAppendSystemPrompt(this.workspacePath, this.channelId, this.sandboxConfig),
+			],
+			agentsFilesOverride: () => {
+				const agentConfig = getAgentConfig(this.channelDir);
+				return {
+					agentsFiles: agentConfig ? [{ path: `${this.workspacePath}/AGENTS.md`, content: agentConfig }] : [],
+				};
+			},
 			skillsOverride: (base) => ({
 				skills: [...base.skills, ...this.currentSkills],
 				diagnostics: base.diagnostics,
@@ -303,27 +349,20 @@ class ChannelRunner implements AgentRunner {
 			// Ensure channel directory exists
 			await mkdir(this.channelDir, { recursive: true });
 
-			// Build user message with timestamp and username prefix
-			const now = new Date();
-			const pad = (n: number) => n.toString().padStart(2, "0");
-			const offset = -now.getTimezoneOffset();
-			const offsetSign = offset >= 0 ? "+" : "-";
-			const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
-			const offsetMins = pad(Math.abs(offset) % 60);
-			const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
-			const userMessage = `[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
+			const userMessage = this.formatUserMessage(ctx.message.text, ctx.message.userName);
+			const promptText = this.shouldPreserveRawInput(ctx.message.text) ? ctx.message.text.trim() : userMessage;
 
 			// Debug: write context to last_prompt.json (only with PIPICLAW_DEBUG=1)
 			if (process.env.PIPICLAW_DEBUG) {
 				const debugContext = {
 					systemPrompt: this.agent.state.systemPrompt,
 					messages: this.session.messages,
-					newUserMessage: userMessage,
+					newUserMessage: promptText,
 				};
 				await writeFile(join(this.channelDir, "last_prompt.json"), JSON.stringify(debugContext, null, 2));
 			}
 
-			await this.session.prompt(userMessage);
+			await this.session.prompt(promptText);
 		} catch (err) {
 			this.runState.stopReason = "error";
 			this.runState.errorMessage = err instanceof Error ? err.message : String(err);
@@ -402,38 +441,6 @@ class ChannelRunner implements AgentRunner {
 				case "help":
 					await this.sendCommandReply(ctx, renderBuiltInHelp());
 					return;
-				case "new": {
-					const completed = await this.session.newSession();
-					if (completed) {
-						await this.applySessionStartConfiguration();
-					}
-					await this.sendCommandReply(
-						ctx,
-						completed ? `已开启新会话。\n\nSession ID: \`${this.session.sessionId}\`` : "新会话已取消。",
-					);
-					return;
-				}
-				case "compact": {
-					const result = await this.session.compact(command.args || undefined);
-					await this.sendCommandReply(
-						ctx,
-						`已压缩当前会话上下文。\n\n- Tokens before compaction: \`${result.tokensBefore}\`\n- Summary:\n\n\`\`\`text\n${result.summary}\n\`\`\``,
-					);
-					return;
-				}
-				case "session": {
-					const stats = this.session.getSessionStats();
-					const currentModel = this.session.model ? `\`${formatModelReference(this.session.model)}\`` : "(none)";
-					const sessionFile = stats.sessionFile ? `\`${basename(stats.sessionFile)}\`` : "(none)";
-					await this.sendCommandReply(
-						ctx,
-						`# Session\n\n- Session ID: \`${stats.sessionId}\`\n- Session file: ${sessionFile}\n- Model: ${currentModel}\n- Thinking level: \`${this.session.thinkingLevel}\`\n- User messages: \`${stats.userMessages}\`\n- Assistant messages: \`${stats.assistantMessages}\`\n- Tool calls: \`${stats.toolCalls}\`\n- Tool results: \`${stats.toolResults}\`\n- Total messages: \`${stats.totalMessages}\`\n- Tokens: \`${stats.tokens.total}\` (input \`${stats.tokens.input}\`, output \`${stats.tokens.output}\`, cache read \`${stats.tokens.cacheRead}\`, cache write \`${stats.tokens.cacheWrite}\`)\n- Cost: \`$${stats.cost.toFixed(4)}\``,
-					);
-					return;
-				}
-				case "model":
-					await this.handleModelCommand(ctx, command.args);
-					return;
 				case "stop":
 					await this.sendCommandReply(ctx, "No task is running. Use `/stop` only while a task is running.");
 					return;
@@ -459,12 +466,12 @@ class ChannelRunner implements AgentRunner {
 		}
 	}
 
-	async queueSteer(text: string): Promise<void> {
-		await this.queueBusyMessage("steer", this.requireQueuedMessage(text, "steer"));
+	async queueSteer(text: string, userName?: string): Promise<void> {
+		await this.queueBusyMessage("steer", this.requireQueuedMessage(text, "steer"), userName);
 	}
 
-	async queueFollowUp(text: string): Promise<void> {
-		await this.queueBusyMessage("followUp", this.requireQueuedMessage(text, "followup"));
+	async queueFollowUp(text: string, userName?: string): Promise<void> {
+		await this.queueBusyMessage("followUp", this.requireQueuedMessage(text, "followup"), userName);
 	}
 
 	abort(): void {
@@ -489,54 +496,28 @@ class ChannelRunner implements AgentRunner {
 		return trimmedText;
 	}
 
-	private async queueBusyMessage(delivery: "steer" | "followUp", text: string): Promise<void> {
+	private shouldPreserveRawInput(text: string): boolean {
+		return text.trim().startsWith("/");
+	}
+
+	private formatUserMessage(text: string, userName?: string, now: Date = new Date()): string {
+		const pad = (n: number) => n.toString().padStart(2, "0");
+		const offset = -now.getTimezoneOffset();
+		const offsetSign = offset >= 0 ? "+" : "-";
+		const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
+		const offsetMins = pad(Math.abs(offset) % 60);
+		const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
+		return `[${timestamp}] [${userName || "unknown"}]: ${text}`;
+	}
+
+	private async queueBusyMessage(delivery: "steer" | "followUp", text: string, userName?: string): Promise<void> {
 		if (!this.session.isStreaming) {
 			throw new Error("No task is currently running.");
 		}
 
-		if (delivery === "followUp") {
-			await this.session.followUp(text);
-		} else {
-			await this.session.steer(text);
-		}
-	}
-
-	private async handleModelCommand(ctx: DingTalkContext, args: string): Promise<void> {
-		this.modelRegistry.refresh();
-		const availableModels = await this.modelRegistry.getAvailable();
-		const currentModel = this.session.model;
-
-		if (!args.trim()) {
-			const current = currentModel ? `\`${formatModelReference(currentModel)}\`` : "(none)";
-			const available = availableModels.length > 0 ? formatModelList(availableModels, currentModel) : "- (none)";
-			await this.sendCommandReply(
-				ctx,
-				`# Model\n\nCurrent model: ${current}\n\nUse \`/model <provider/modelId>\` or \`/model <modelId>\` to switch. Bare model IDs must resolve uniquely.\n\nAvailable models:\n${available}`,
-			);
-			return;
-		}
-
-		const match = findExactModelReferenceMatch(args, availableModels);
-		if (match.match) {
-			await this.session.setModel(match.match);
-			this.activeModel = match.match;
-			await this.sendCommandReply(ctx, `已切换模型到 \`${formatModelReference(match.match)}\`。`);
-			return;
-		}
-
-		const available = availableModels.length > 0 ? formatModelList(availableModels, currentModel, 10) : "- (none)";
-		if (match.ambiguous) {
-			await this.sendCommandReply(
-				ctx,
-				`未切换模型：\`${args.trim()}\` 匹配到多个模型。请改用精确的 \`provider/modelId\` 形式。\n\nAvailable models:\n${available}`,
-			);
-			return;
-		}
-
-		await this.sendCommandReply(
-			ctx,
-			`未找到模型 \`${args.trim()}\`。请使用精确的 \`provider/modelId\` 或唯一的 \`modelId\`。\n\nAvailable models:\n${available}`,
-		);
+		await this.session.prompt(this.formatUserMessage(text, userName), {
+			streamingBehavior: delivery,
+		});
 	}
 
 	private resetRunState(ctx: DingTalkContext): void {
@@ -549,16 +530,9 @@ class ChannelRunner implements AgentRunner {
 		};
 	}
 
-	private buildSessionStartPrompt(skills: Skill[]): string {
-		const soul = getSoul(this.workspaceDir);
-		const agentConfig = getAgentConfig(this.channelDir);
-		return buildSystemPrompt(this.workspacePath, this.channelId, soul, agentConfig, this.sandboxConfig, skills);
-	}
-
-	private async applySessionStartConfiguration(): Promise<void> {
+	private async refreshSessionResources(): Promise<void> {
 		const skills = loadPipiclawSkills(this.channelDir, this.workspacePath);
 		this.currentSkills = skills;
-		this.session.agent.setSystemPrompt(this.buildSessionStartPrompt(skills));
 		await this.session.reload();
 	}
 
@@ -610,6 +584,20 @@ class ChannelRunner implements AgentRunner {
 				}
 			} else if (event.type === "message_end") {
 				const agentEvent = event as any & { type: "message_end" };
+				const commandResultText = extractCustomCommandResultText(agentEvent.message);
+				if (commandResultText) {
+					this.runState.finalOutcome = { kind: "final", text: commandResultText };
+					log.logResponse(logCtx, commandResultText);
+					queue.enqueue(async () => {
+						const delivered = await ctx.respondPlain(commandResultText);
+						if (!delivered) {
+							await ctx.replaceMessage(commandResultText);
+						}
+						this.runState.finalResponseDelivered = true;
+					}, "command result");
+					return;
+				}
+
 				if (agentEvent.message.role === "assistant") {
 					const assistantMsg = agentEvent.message as any;
 
