@@ -6,7 +6,7 @@ import { createEditTool } from "./edit.js";
 import { createReadTool } from "./read.js";
 import { createWriteTool } from "./write.js";
 
-export function createMomTools(executor: Executor, uploadFn?: UploadFunction): AgentTool<any>[] {
+export function createPipiclawTools(executor: Executor, uploadFn?: UploadFunction): AgentTool<any>[] {
 	return [
 		createReadTool(executor),
 		createBashTool(executor),

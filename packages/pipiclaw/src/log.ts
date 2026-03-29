@@ -217,16 +217,16 @@ export function logUsageSummary(
 
 // Startup
 export function logStartup(workingDir: string, sandbox: string): void {
-	console.log("Starting mom-dingtalk bot...");
+	console.log("Starting pipiclaw...");
 	console.log(`  Working directory: ${workingDir}`);
 	console.log(`  Sandbox: ${sandbox}`);
 }
 
 export function logConnected(): void {
-	console.log("⚡️ mom-dingtalk bot connected and listening!");
+	console.log("⚡️ pipiclaw connected and listening!");
 	console.log("");
 }
 
 export function logDisconnected(): void {
-	console.log("mom-dingtalk bot disconnected.");
+	console.log("pipiclaw disconnected.");
 }

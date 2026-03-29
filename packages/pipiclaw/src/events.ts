@@ -30,7 +30,7 @@ export interface PeriodicEvent {
 	timezone: string; // IANA timezone
 }
 
-export type MomEvent = ImmediateEvent | OneShotEvent | PeriodicEvent;
+export type ScheduledEvent = ImmediateEvent | OneShotEvent | PeriodicEvent;
 
 // ============================================================================
 // EventsWatcher
@@ -163,7 +163,7 @@ export class EventsWatcher {
 	private async handleFile(filename: string): Promise<void> {
 		const filePath = join(this.eventsDir, filename);
 
-		let event: MomEvent | null = null;
+		let event: ScheduledEvent | null = null;
 		let lastError: Error | null = null;
 
 		for (let i = 0; i < MAX_RETRIES; i++) {
@@ -200,7 +200,7 @@ export class EventsWatcher {
 		}
 	}
 
-	private parseEvent(content: string, filename: string): MomEvent | null {
+	private parseEvent(content: string, filename: string): ScheduledEvent | null {
 		const data = JSON.parse(content);
 
 		if (!data.type || !data.channelId || !data.text) {
@@ -294,7 +294,7 @@ export class EventsWatcher {
 		}
 	}
 
-	private execute(filename: string, event: MomEvent, deleteAfter: boolean = true): void {
+	private execute(filename: string, event: ScheduledEvent, deleteAfter: boolean = true): void {
 		let scheduleInfo: string;
 		switch (event.type) {
 			case "immediate":

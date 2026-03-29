@@ -1,5 +1,5 @@
 /**
- * Context management for mom-dingtalk.
+ * Context management for pipiclaw.
  *
  * Uses two files per channel:
  * - context.jsonl: Structured API messages for LLM context (same format as coding-agent sessions)
@@ -7,7 +7,7 @@
  *
  * This module provides:
  * - syncLogToSessionManager: Syncs messages from log.jsonl to SessionManager
- * - MomSettingsManager: Simple settings for mom-dingtalk (compaction, retry, model preferences)
+ * - PipiclawSettingsManager: Simple settings for pipiclaw (compaction, retry, model preferences)
  */
 
 import type { UserMessage } from "@mariozechner/pi-ai";
@@ -155,55 +155,55 @@ export function syncLogToSessionManager(
 }
 
 // ============================================================================
-// MomSettingsManager - Simple settings for mom-dingtalk
+// PipiclawSettingsManager - Simple settings for pipiclaw
 // ============================================================================
 
-export interface MomCompactionSettings {
+export interface PipiclawCompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
 	keepRecentTokens: number;
 }
 
-export interface MomRetrySettings {
+export interface PipiclawRetrySettings {
 	enabled: boolean;
 	maxRetries: number;
 	baseDelayMs: number;
 }
 
-export interface MomSettings {
+export interface PipiclawSettings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high";
-	compaction?: Partial<MomCompactionSettings>;
-	retry?: Partial<MomRetrySettings>;
+	compaction?: Partial<PipiclawCompactionSettings>;
+	retry?: Partial<PipiclawRetrySettings>;
 }
 
-const DEFAULT_COMPACTION: MomCompactionSettings = {
+const DEFAULT_COMPACTION: PipiclawCompactionSettings = {
 	enabled: true,
 	reserveTokens: 16384,
 	keepRecentTokens: 20000,
 };
 
-const DEFAULT_RETRY: MomRetrySettings = {
+const DEFAULT_RETRY: PipiclawRetrySettings = {
 	enabled: true,
 	maxRetries: 3,
 	baseDelayMs: 2000,
 };
 
 /**
- * Settings manager for mom-dingtalk.
- * Stores settings in the workspace root directory.
+ * Settings manager for pipiclaw.
+ * Stores global settings in the pipiclaw root directory.
  */
-export class MomSettingsManager {
+export class PipiclawSettingsManager {
 	private settingsPath: string;
-	private settings: MomSettings;
+	private settings: PipiclawSettings;
 
-	constructor(workspaceDir: string) {
-		this.settingsPath = join(workspaceDir, "settings.json");
+	constructor(baseDir: string) {
+		this.settingsPath = join(baseDir, "settings.json");
 		this.settings = this.load();
 	}
 
-	private load(): MomSettings {
+	private load(): PipiclawSettings {
 		if (!existsSync(this.settingsPath)) {
 			return {};
 		}
@@ -228,7 +228,7 @@ export class MomSettingsManager {
 		}
 	}
 
-	getCompactionSettings(): MomCompactionSettings {
+	getCompactionSettings(): PipiclawCompactionSettings {
 		return {
 			...DEFAULT_COMPACTION,
 			...this.settings.compaction,
@@ -244,7 +244,7 @@ export class MomSettingsManager {
 		this.save();
 	}
 
-	getRetrySettings(): MomRetrySettings {
+	getRetrySettings(): PipiclawRetrySettings {
 		return {
 			...DEFAULT_RETRY,
 			...this.settings.retry,
@@ -279,7 +279,7 @@ export class MomSettingsManager {
 	}
 
 	setDefaultThinkingLevel(level: string): void {
-		this.settings.defaultThinkingLevel = level as MomSettings["defaultThinkingLevel"];
+		this.settings.defaultThinkingLevel = level as PipiclawSettings["defaultThinkingLevel"];
 		this.save();
 	}
 
@@ -557,7 +557,7 @@ export class MomSettingsManager {
 		this.settings = this.load();
 	}
 
-	applyOverrides(_overrides: Partial<MomSettings>): void {
+	applyOverrides(_overrides: Partial<PipiclawSettings>): void {
 		// No-op
 	}
 

@@ -1,16 +1,15 @@
 {
-    "name": "@anthropic-ai/pi-mom-dingtalk",
-    "version": "0.1.0",
-    "description": "DingTalk bot that delegates messages to the pi coding agent via AI Cards",
+    "name": "@oyasmi/pipiclaw",
+    "version": "0.1.1",
+    "description": "Pipiclaw DingTalk bot powered by the pi coding agent",
     "type": "module",
     "bin": {
-        "mom-dingtalk": "dist/main.js"
+        "pipiclaw": "dist/main.js"
     },
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts",
     "files": [
         "dist",
-        "CHANGELOG.md"
+        "CHANGELOG.md",
+        "README.md"
     ],
     "scripts": {
         "clean": "rm -rf dist",
@@ -44,7 +43,10 @@
     "repository": {
         "type": "git",
         "url": "git+https://github.com/badlogic/pi-mono.git",
-        "directory": "packages/mom-dingtalk"
+        "directory": "packages/pipiclaw"
+    },
+    "publishConfig": {
+        "access": "public"
     },
     "engines": {
         "node": ">=20.0.0"

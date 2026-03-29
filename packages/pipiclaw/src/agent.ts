@@ -13,15 +13,15 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { existsSync, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
-import { homedir } from "os";
 import { basename, join } from "path";
 import { type BuiltInCommand, renderBuiltInHelp } from "./commands.js";
-import { MomSettingsManager, syncLogToSessionManager } from "./context.js";
+import { PipiclawSettingsManager, syncLogToSessionManager } from "./context.js";
 import type { DingTalkContext } from "./dingtalk.js";
 import * as log from "./log.js";
+import { APP_HOME_DIR, AUTH_CONFIG_PATH, MODELS_CONFIG_PATH } from "./paths.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelStore } from "./store.js";
-import { createMomTools } from "./tools/index.js";
+import { createPipiclawTools } from "./tools/index.js";
 
 // Default model - will be overridden by ModelRegistry if custom models are configured
 const defaultModel = getModel("anthropic", "claude-sonnet-4-5");
@@ -116,6 +116,27 @@ function formatModelList(models: Model<Api>[], currentModel: Model<Api> | undefi
 	}
 
 	return `${refs.slice(0, limit).join("\n")}\n- ... and ${refs.length - limit} more`;
+}
+
+function resolveInitialModel(modelRegistry: ModelRegistry, settingsManager: PipiclawSettingsManager): Model<Api> {
+	const savedProvider = settingsManager.getDefaultProvider();
+	const savedModelId = settingsManager.getDefaultModel();
+	const availableModels = modelRegistry.getAvailable();
+	if (savedProvider && savedModelId) {
+		const savedModel = modelRegistry.find(savedProvider, savedModelId);
+		if (
+			savedModel &&
+			availableModels.some((model) => model.provider === savedModel.provider && model.id === savedModel.id)
+		) {
+			return savedModel;
+		}
+	}
+
+	if (availableModels.length > 0) {
+		return availableModels[0];
+	}
+
+	return defaultModel;
 }
 
 async function getApiKeyForModel(modelRegistry: ModelRegistry, model: any): Promise<string> {
@@ -230,7 +251,7 @@ function getMemory(channelDir: string): string {
 	return combined;
 }
 
-function loadMomSkills(channelDir: string, workspacePath: string): Skill[] {
+function loadPipiclawSkills(channelDir: string, workspacePath: string): Skill[] {
 	const skillMap = new Map<string, Skill>();
 	const hostWorkspacePath = join(channelDir, "..");
 
@@ -523,16 +544,15 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	const executor = createExecutor(sandboxConfig);
 	const workspacePath = executor.getWorkspacePath(channelDir.replace(`/${channelId}`, ""));
 	const workspaceDir = join(channelDir, "..");
-	const momAgentDir = join(homedir(), ".pi", "mom-dingtalk");
 
 	// Create tools
-	const tools = createMomTools(executor);
+	const tools = createPipiclawTools(executor);
 
 	// Initial system prompt
 	const soul = getSoul(workspaceDir);
 	const agentConfig = getAgentConfig(channelDir);
 	const memory = getMemory(channelDir);
-	const initialSkills = loadMomSkills(channelDir, workspacePath);
+	const initialSkills = loadPipiclawSkills(channelDir, workspacePath);
 	let currentSkills = initialSkills;
 	const systemPrompt = buildSystemPrompt(
 		workspacePath,
@@ -547,22 +567,15 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	// Create session manager
 	const contextFile = join(channelDir, "context.jsonl");
 	const sessionManager = SessionManager.open(contextFile, channelDir);
-	const settingsManager = new MomSettingsManager(workspaceDir);
+	const settingsManager = new PipiclawSettingsManager(APP_HOME_DIR);
 
 	// Create AuthStorage and ModelRegistry
-	const authStorage = AuthStorage.create(join(momAgentDir, "auth.json"));
-	const modelRegistry = new ModelRegistry(authStorage, join(momAgentDir, "models.json"));
+	const authStorage = AuthStorage.create(AUTH_CONFIG_PATH);
+	const modelRegistry = new ModelRegistry(authStorage, MODELS_CONFIG_PATH);
 
-	// Resolve model: prefer available custom models, fall back to default
-	const availableModels = modelRegistry.getAvailable();
-	let activeModel: Model<Api>;
-	if (availableModels.length > 0) {
-		activeModel = availableModels[0];
-		log.logInfo(`Using model: ${activeModel.provider}/${activeModel.id} (${activeModel.name})`);
-	} else {
-		activeModel = defaultModel;
-		log.logInfo(`Using default model: ${activeModel.provider}/${activeModel.id}`);
-	}
+	// Resolve model: prefer saved global default, fall back to first available model
+	let activeModel = resolveInitialModel(modelRegistry, settingsManager);
+	log.logInfo(`Using model: ${activeModel.provider}/${activeModel.id} (${activeModel.name})`);
 
 	// Create agent
 	const agent = new Agent({
@@ -585,7 +598,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: process.cwd(),
-		agentDir: momAgentDir,
+		agentDir: APP_HOME_DIR,
 		settingsManager: settingsManager as any,
 		skillsOverride: (base) => ({
 			skills: [...base.skills, ...currentSkills],
@@ -987,7 +1000,7 @@ ${result.summary}
 				const soul = getSoul(workspaceDir);
 				const agentConfig = getAgentConfig(channelDir);
 				const memory = getMemory(channelDir);
-				const skills = loadMomSkills(channelDir, workspacePath);
+				const skills = loadPipiclawSkills(channelDir, workspacePath);
 				currentSkills = skills;
 				const systemPrompt = buildSystemPrompt(
 					workspacePath,
@@ -1027,8 +1040,8 @@ ${result.summary}
 				const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
 				const userMessage = `[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
 
-				// Debug: write context to last_prompt.jsonl (only with MOM_DEBUG=1)
-				if (process.env.MOM_DEBUG) {
+				// Debug: write context to last_prompt.json (only with PIPICLAW_DEBUG=1)
+				if (process.env.PIPICLAW_DEBUG) {
 					const debugContext = {
 						systemPrompt,
 						messages: session.messages,
