@@ -7,6 +7,7 @@ Pipiclaw 是一个接入钉钉的 AI Card 机器人，把 [pi-coding-agent](../c
 - 钉钉 Stream 模式接收消息，自动重连
 - 过程性思考和执行信息通过 AI Card 展示，最终答复独立快速返回
 - 内置 Slash 命令：`/help`、`/new`、`/compact`、`/session`、`/model`
+- 忙碌时默认将普通新消息作为 steer 送入当前任务，也支持显式 `/steer`、`/followup`、`/stop`
 - 每个 DM / 群聊独立工作空间
 - 支持全局和频道级 `SOUL.md`、`AGENTS.md`、`MEMORY.md`
 - 支持全局和频道级技能目录
@@ -144,18 +145,44 @@ pipiclaw --sandbox=docker:your-container
 
 ## 内置 Slash 命令
 
-以下命令由 Pipiclaw 直接处理，不会作为普通 prompt 发送给模型：
+以下命令由 Pipiclaw 直接处理，不会作为普通 prompt 发送给模型。
+
+### 空闲时可用
 
 - `/help`
+  显示帮助
 - `/new`
+  开启新会话
 - `/compact [instructions]`
+  手动压缩当前会话上下文
 - `/session`
+  查看当前会话状态、消息统计、token 使用和模型信息
 - `/model [provider/modelId|modelId]`
+  查看当前模型，或用精确匹配切换模型
 
 说明：
 
 - `/model` 无参数时返回当前模型和可用模型列表
 - `/model <ref>` 只支持精确匹配
+
+### 忙碌时可用
+
+- 普通消息
+  默认按 `steer` 处理，在当前工具步骤结束后尽快转向
+- `/help`
+  显示帮助
+- `/stop`
+  停止当前任务
+- `/steer <message>`
+  显式指定一次 steer，改变当前任务方向
+- `/followup <message>`
+  将一条新请求排到当前任务完成之后再执行
+
+说明：
+
+- busy 时普通消息默认等价于 `/steer <message>`
+- `/steer` 更适合纠偏、补充限制条件、修改当前任务方向
+- `/followup` 更适合“等这件事做完，再继续做下一件事”
 - 未被 Pipiclaw 拦截的其他 slash 输入，仍会按 `AgentSession.prompt()` 的原有逻辑处理
 
 ## Workspace Files

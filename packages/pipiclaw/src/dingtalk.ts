@@ -11,6 +11,7 @@ import axios from "axios";
 import { DWClient, type DWClientDownStream, type RobotMessage, TOPIC_ROBOT } from "dingtalk-stream";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
+import { parseBuiltInCommand, renderBuiltInHelp } from "./commands.js";
 import * as log from "./log.js";
 
 // ============================================================================
@@ -59,10 +60,13 @@ export interface DingTalkContext {
 	close: () => Promise<void>;
 }
 
+export type BusyMessageMode = "steer" | "followUp";
+
 export interface DingTalkHandler {
 	isRunning(channelId: string): boolean;
 	handleEvent(event: DingTalkEvent, bot: DingTalkBot, isEvent?: boolean): Promise<void>;
 	handleStop(channelId: string, bot: DingTalkBot): Promise<void>;
+	handleBusyMessage(event: DingTalkEvent, bot: DingTalkBot, mode: BusyMessageMode, queueText: string): Promise<void>;
 }
 
 // ============================================================================
@@ -722,18 +726,40 @@ export class DingTalkBot {
 			conversationType,
 		};
 
-		// Check for stop command
-		if (content.toLowerCase().trim() === "stop") {
-			if (this.handler.isRunning(channelId)) {
-				this.handler.handleStop(channelId, this);
-			}
-			return;
-		}
+		const builtInCommand = parseBuiltInCommand(content);
 
 		// Check if busy
 		if (this.handler.isRunning(channelId)) {
-			const busyMsg = "正在处理中，请稍候。发送 `stop` 可取消当前任务。";
-			await this.sendPlain(channelId, busyMsg);
+			if (builtInCommand?.name === "help") {
+				await this.sendPlain(channelId, renderBuiltInHelp());
+				return;
+			}
+
+			if (builtInCommand?.name === "stop") {
+				await this.handler.handleStop(channelId, this);
+				await this.sendPlain(channelId, "Stopping the current task.");
+				return;
+			}
+
+			if (builtInCommand?.name === "steer") {
+				await this.handler.handleBusyMessage(event, this, "steer", builtInCommand.args);
+				return;
+			}
+
+			if (builtInCommand?.name === "followup") {
+				await this.handler.handleBusyMessage(event, this, "followUp", builtInCommand.args);
+				return;
+			}
+
+			if (builtInCommand) {
+				await this.sendPlain(
+					channelId,
+					"A task is already running. Use `/stop`, `/steer <message>`, or `/followup <message>`. Plain messages default to steer.",
+				);
+				return;
+			}
+
+			await this.handler.handleBusyMessage(event, this, "steer", content);
 			return;
 		}
 

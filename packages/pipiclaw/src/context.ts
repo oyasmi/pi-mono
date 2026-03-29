@@ -26,6 +26,7 @@ interface LogMessage {
 	userName?: string;
 	text?: string;
 	isBot?: boolean;
+	skipContextSync?: boolean;
 }
 
 /**
@@ -34,8 +35,8 @@ interface LogMessage {
  * Uses byte-offset tracking for incremental reads (only processes new content)
  * and timestamp-based dedup for crash safety.
  *
- * This ensures that messages logged while mom wasn't running (channel chatter,
- * messages while busy) are added to the LLM context.
+ * This ensures that messages logged while pipiclaw wasn't running (channel chatter,
+ * externally appended user messages) are added to the LLM context.
  *
  * @param sessionManager - The SessionManager to sync to
  * @param channelDir - Path to channel directory containing log.jsonl
@@ -118,8 +119,8 @@ export function syncLogToSessionManager(
 			// Skip the current message being processed (will be added via prompt())
 			if (excludeTs && ts === excludeTs) continue;
 
-			// Skip bot messages — they're managed by SessionManager
-			if (logMsg.isBot) continue;
+			// Skip bot messages and user inputs already delivered directly to AgentSession.
+			if (logMsg.isBot || logMsg.skipContextSync) continue;
 
 			const msgTime = new Date(date).getTime() || Date.now();
 

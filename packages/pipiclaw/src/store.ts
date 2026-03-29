@@ -10,6 +10,8 @@ export interface LoggedMessage {
 	displayName?: string;
 	text: string;
 	isBot: boolean;
+	deliveryMode?: "steer" | "followUp";
+	skipContextSync?: boolean;
 }
 
 export interface ChannelStoreConfig {

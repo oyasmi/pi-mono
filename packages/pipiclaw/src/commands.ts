@@ -1,4 +1,4 @@
-export type BuiltInCommandName = "help" | "new" | "compact" | "session" | "model";
+export type BuiltInCommandName = "help" | "new" | "compact" | "session" | "model" | "steer" | "followup" | "stop";
 
 export interface BuiltInCommand {
 	name: BuiltInCommandName;
@@ -9,6 +9,8 @@ export interface BuiltInCommand {
 const HELP_TEXT = `# Slash Commands
 
 The following slash commands are supported:
+
+## Available When Idle
 
 - \`/help\`
   Show command help
@@ -27,6 +29,23 @@ The following slash commands are supported:
   Show the current model, or switch models using an exact match
   Example: \`/model\`
   Example: \`/model anthropic/claude-opus-4-6\`
+
+## Available While A Task Is Running
+
+- \`/help\`
+  Show command help
+  Example: \`/help\`
+- \`/stop\`
+  Stop the current task
+  Example: \`/stop\`
+- \`/steer <message>\`
+  Change the current task after the current tool step finishes
+  Example: \`/steer Use the Shanghai time zone and summarize only the latest updates\`
+- \`/followup <message>\`
+  Queue another request to run after the current task completes
+  Example: \`/followup After that, draft a short executive summary\`
+
+While a task is running, a plain message is treated as \`steer\` by default.
 `;
 
 export function parseBuiltInCommand(text: string): BuiltInCommand | null {
@@ -45,6 +64,9 @@ export function parseBuiltInCommand(text: string): BuiltInCommand | null {
 		case "compact":
 		case "session":
 		case "model":
+		case "steer":
+		case "followup":
+		case "stop":
 			return { name: rawName, args, rawText };
 		default:
 			return null;

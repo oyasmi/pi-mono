@@ -10,6 +10,7 @@
 - log.jsonl rotation (> 1MB archived to .1)
 - Periodic memory consolidation event template in README
 - DingTalk channel now intercepts `/help`, `/new`, `/compact`, `/session`, and `/model` as built-in slash commands instead of sending them to the LLM
+- DingTalk channel now supports busy-time steering controls: plain messages default to steer, and `/steer`, `/followup`, and `/stop` are handled directly while a task is running
 
 ### Changed
 

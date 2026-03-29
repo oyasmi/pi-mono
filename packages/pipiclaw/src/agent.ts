@@ -29,6 +29,8 @@ const defaultModel = getModel("anthropic", "claude-sonnet-4-5");
 export interface AgentRunner {
 	run(ctx: DingTalkContext, store: ChannelStore): Promise<{ stopReason: string; errorMessage?: string }>;
 	handleBuiltinCommand(ctx: DingTalkContext, command: BuiltInCommand): Promise<void>;
+	queueSteer(text: string): Promise<void>;
+	queueFollowUp(text: string): Promise<void>;
 	abort(): void;
 }
 
@@ -668,6 +670,26 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		}
 	};
 
+	const requireQueuedMessage = (text: string, commandName: "steer" | "followup"): string => {
+		const trimmedText = text.trim();
+		if (!trimmedText) {
+			throw new Error(`/${commandName} requires a message.`);
+		}
+		return trimmedText;
+	};
+
+	const queueBusyMessage = async (delivery: "steer" | "followUp", text: string): Promise<void> => {
+		if (!session.isStreaming) {
+			throw new Error("No task is currently running.");
+		}
+
+		if (delivery === "followUp") {
+			await session.followUp(text);
+		} else {
+			await session.steer(text);
+		}
+	};
+
 	const handleModelBuiltinCommand = async (ctx: DingTalkContext, args: string): Promise<void> => {
 		modelRegistry.refresh();
 		const availableModels = await modelRegistry.getAvailable();
@@ -776,6 +798,20 @@ ${result.summary}
 				}
 				case "model":
 					await handleModelBuiltinCommand(ctx, command.args);
+					return;
+				case "stop":
+					await sendCommandReply(ctx, "No task is running. Use `/stop` only while a task is running.");
+					return;
+				case "steer":
+					requireQueuedMessage(command.args, "steer");
+					await sendCommandReply(ctx, "No task is running. Send the message directly instead of using `/steer`.");
+					return;
+				case "followup":
+					requireQueuedMessage(command.args, "followup");
+					await sendCommandReply(
+						ctx,
+						"No task is running. Send the message directly now, or use `/followup` while a task is running.",
+					);
 					return;
 			}
 		} catch (err) {
@@ -948,6 +984,14 @@ ${result.summary}
 	return {
 		async handleBuiltinCommand(ctx: DingTalkContext, command: BuiltInCommand): Promise<void> {
 			await handleBuiltInCommand(ctx, command);
+		},
+
+		async queueSteer(text: string): Promise<void> {
+			await queueBusyMessage("steer", requireQueuedMessage(text, "steer"));
+		},
+
+		async queueFollowUp(text: string): Promise<void> {
+			await queueBusyMessage("followUp", requireQueuedMessage(text, "followup"));
 		},
 
 		async run(ctx: DingTalkContext, _store: ChannelStore): Promise<{ stopReason: string; errorMessage?: string }> {

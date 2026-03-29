@@ -5,7 +5,13 @@ import { join } from "path";
 import { type AgentRunner, getOrCreateRunner } from "./agent.js";
 import { parseBuiltInCommand } from "./commands.js";
 import { createDingTalkContext } from "./delivery.js";
-import { DingTalkBot, type DingTalkConfig, type DingTalkEvent, type DingTalkHandler } from "./dingtalk.js";
+import {
+	type BusyMessageMode,
+	DingTalkBot,
+	type DingTalkConfig,
+	type DingTalkEvent,
+	type DingTalkHandler,
+} from "./dingtalk.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import {
@@ -308,6 +314,48 @@ const handler: DingTalkHandler = {
 			state.stopRequested = true;
 			state.runner.abort();
 			log.logInfo(`[${channelId}] Stop requested`);
+		}
+	},
+
+	async handleBusyMessage(
+		event: DingTalkEvent,
+		bot: DingTalkBot,
+		mode: BusyMessageMode,
+		queueText: string,
+	): Promise<void> {
+		const state = getState(event.channelId);
+		const trimmedQueueText = queueText.trim();
+
+		await state.store.logMessage(event.channelId, {
+			date: new Date().toISOString(),
+			ts: event.ts,
+			user: event.user,
+			userName: event.userName,
+			text: event.text,
+			isBot: false,
+			deliveryMode: mode,
+			skipContextSync: true,
+		});
+
+		try {
+			if (mode === "followUp") {
+				await state.runner.queueFollowUp(trimmedQueueText);
+			} else {
+				await state.runner.queueSteer(trimmedQueueText);
+			}
+
+			const confirmation =
+				mode === "followUp"
+					? "Queued as follow-up. I’ll handle it after the current task completes."
+					: event.text.trim().startsWith("/")
+						? "Queued as steer. I’ll apply it after the current tool step finishes."
+						: "Queued as steer. I’ll apply this after the current tool step finishes. Use `/followup <message>` to queue it after completion.";
+			await bot.sendPlain(event.channelId, confirmation);
+			log.logInfo(`[${event.channelId}] Queued ${mode}: ${trimmedQueueText.substring(0, 80)}`);
+		} catch (err) {
+			const errMsg = err instanceof Error ? err.message : String(err);
+			log.logWarning(`[${event.channelId}] Failed to queue ${mode}`, errMsg);
+			await bot.sendPlain(event.channelId, `Could not queue this message: ${errMsg}`);
 		}
 	},
 
