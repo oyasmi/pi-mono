@@ -6,7 +6,6 @@ export function buildSystemPrompt(
 	channelId: string,
 	soul: string,
 	agentConfig: string,
-	memory: string,
 	sandboxConfig: SandboxConfig,
 	skills: Skill[],
 ): string {
@@ -40,8 +39,8 @@ export function buildSystemPrompt(
 	// 2. Core instructions
 	sections.push(`## Context
 - For current date/time, use: date
-- You have access to previous conversation context including tool results from prior turns.
-- For older history beyond your context, search log.jsonl (contains user messages and your final responses, but not tool results).
+- You have access to the active session context for this session.
+- Raw transcript files are cold storage. Do not assume they are preloaded.
 
 ## Formatting
 Use Markdown for formatting. DingTalk AI Card supports basic Markdown:
@@ -54,13 +53,14 @@ ${envDescription}
 ${workspacePath}/
 ├── SOUL.md                      # Your identity/personality (read-only)
 ├── AGENTS.md                    # Custom behavior instructions (read-only)
-├── MEMORY.md                    # Global memory (all channels, you can read/write)
+├── MEMORY.md                    # Stable workspace memory (admin-managed, read on demand)
 ├── skills/                      # Global CLI tools you create
 ├── events/                      # Scheduled events
 └── ${channelId}/                # This channel
-    ├── AGENTS.md                # Channel-specific instructions (read-only)
-    ├── MEMORY.md                # Channel-specific memory (you can read/write)
-    ├── log.jsonl                # Message history (no tool results)
+    ├── MEMORY.md                # Channel durable memory (read on demand, runtime-managed)
+    ├── HISTORY.md               # Channel summarized history (read on demand, runtime-managed)
+    ├── log.jsonl                # Raw message archive (cold storage)
+    ├── context.jsonl            # Raw session archive (cold storage)
     ├── scratch/                 # Your working directory
     └── skills/                  # Channel-specific tools`);
 
@@ -133,20 +133,26 @@ Maximum 5 events can be queued.`);
 
 	// 6. Memory
 	sections.push(`## Memory
-Write to MEMORY.md files to persist context across conversations.
-- Global (${workspacePath}/MEMORY.md): skills, preferences, project info
-- Channel (${channelPath}/MEMORY.md): channel-specific decisions, ongoing work
+Memory files are not preloaded into session context. Read them explicitly when memory or history matters.
 
-### Guidelines
-- Keep each MEMORY.md concise (target: under 50 lines)
-- Use clear headers to organize entries (## Preferences, ## Projects, etc.)
-- Remove outdated entries when they are no longer relevant
-- Merge duplicate or redundant items
-- Prefer structured formats (lists, key-value pairs) over prose
-- Update when you learn something important or when asked to remember something
+### Files
+- Workspace memory: ${workspacePath}/MEMORY.md
+  Stable shared background memory. Admin-managed. Read on demand.
+- Channel memory: ${channelPath}/MEMORY.md
+  Durable channel memory. Runtime-managed via consolidation. You may update this file manually when necessary.
+- Channel history: ${channelPath}/HISTORY.md
+  Summarized older channel history. Runtime-managed. Read on demand. Do not maintain this file manually during normal work.
 
-### Current Memory
-${memory}`);
+### Runtime Behavior
+- The runtime automatically consolidates channel memory before compaction or session trimming.
+- Consolidation updates channel MEMORY.md and HISTORY.md.
+- Workspace MEMORY.md is not automatically updated by the runtime.
+
+### Cold Storage
+- ${channelPath}/log.jsonl is a raw archive. It is not normal memory and is not proactively loaded.
+- ${channelPath}/context.jsonl is a raw session archive. It is not normal memory and is not proactively loaded.
+
+When a task depends on prior decisions, preferences, or long-running work, read channel MEMORY.md and HISTORY.md first.`);
 
 	// 7. System Configuration Log
 	sections.push(`## System Configuration Log
@@ -166,20 +172,6 @@ Update this file whenever you modify the environment.`);
 - edit: Surgical file edits
 
 Each tool requires a "label" parameter (shown to user).`);
-
-	// 9. Log Queries
-	sections.push(`## Log Queries (for older history)
-Format: \`{"date":"...","ts":"...","user":"...","userName":"...","text":"...","isBot":false}\`
-The log contains user messages and your final responses (not tool calls/results).
-${isDocker ? "Install jq: apk add jq" : ""}
-
-\`\`\`bash
-# Recent messages
-tail -30 log.jsonl | jq -c '{date: .date[0:19], user: (.userName // .user), text}'
-
-# Search for specific topic
-grep -i "topic" log.jsonl | jq -c '{date: .date[0:19], user: (.userName // .user), text}'
-\`\`\``);
 
 	return sections.join("\n\n");
 }

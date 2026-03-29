@@ -1,159 +1,14 @@
 /**
  * Context management for pipiclaw.
  *
- * Uses two files per channel:
- * - context.jsonl: Structured API messages for LLM context (same format as coding-agent sessions)
- * - log.jsonl: Human-readable channel history for grep (no tool results)
+ * `log.jsonl` and `context.jsonl` are treated as raw cold storage.
+ * They are not proactively scanned or loaded as part of the memory model.
  *
- * This module provides:
- * - syncLogToSessionManager: Syncs messages from log.jsonl to SessionManager
- * - PipiclawSettingsManager: Simple settings for pipiclaw (compaction, retry, model preferences)
+ * This module currently provides only PipiclawSettingsManager.
  */
 
-import type { UserMessage } from "@mariozechner/pi-ai";
-import type { SessionManager, SessionMessageEntry } from "@mariozechner/pi-coding-agent";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
-
-// ============================================================================
-// Sync log.jsonl to SessionManager
-// ============================================================================
-
-interface LogMessage {
-	date?: string;
-	ts?: string;
-	user?: string;
-	userName?: string;
-	text?: string;
-	isBot?: boolean;
-	skipContextSync?: boolean;
-}
-
-/**
- * Sync user messages from log.jsonl to SessionManager.
- *
- * Uses byte-offset tracking for incremental reads (only processes new content)
- * and timestamp-based dedup for crash safety.
- *
- * This ensures that messages logged while pipiclaw wasn't running (channel chatter,
- * externally appended user messages) are added to the LLM context.
- *
- * @param sessionManager - The SessionManager to sync to
- * @param channelDir - Path to channel directory containing log.jsonl
- * @param excludeTs - Timestamp of current message (will be added via prompt(), not sync)
- * @returns Number of messages synced
- */
-export function syncLogToSessionManager(
-	sessionManager: SessionManager,
-	channelDir: string,
-	excludeTs?: string,
-): number {
-	const logFile = join(channelDir, "log.jsonl");
-	const syncOffsetFile = join(channelDir, ".sync-offset");
-
-	if (!existsSync(logFile)) return 0;
-
-	// Read sync offset (byte position of last processed content)
-	let offset = 0;
-	if (existsSync(syncOffsetFile)) {
-		try {
-			offset = Number(readFileSync(syncOffsetFile, "utf-8").trim()) || 0;
-		} catch {
-			offset = 0;
-		}
-	}
-
-	// Check file size
-	const fileStats = statSync(logFile);
-	if (fileStats.size < offset) {
-		// File was truncated or rotated — reset to beginning
-		offset = 0;
-	}
-	if (fileStats.size === offset) {
-		return 0; // No new content
-	}
-
-	// Read only new bytes from log.jsonl
-	const bytesToRead = fileStats.size - offset;
-	const fd = openSync(logFile, "r");
-	let newContent: string;
-	try {
-		const buffer = Buffer.alloc(bytesToRead);
-		readSync(fd, buffer, 0, bytesToRead, offset);
-		newContent = buffer.toString("utf-8");
-	} finally {
-		closeSync(fd);
-	}
-
-	const newLines = newContent.trim().split("\n").filter(Boolean);
-	if (newLines.length === 0) {
-		writeFileSync(syncOffsetFile, String(fileStats.size));
-		return 0;
-	}
-
-	// Build set of existing user message timestamps for crash-safe dedup.
-	// This prevents duplicates if the process crashed after appendMessage()
-	// but before writing the sync offset.
-	const existingTimestamps = new Set<number>();
-	for (const entry of sessionManager.getEntries()) {
-		if (entry.type === "message") {
-			const msgEntry = entry as SessionMessageEntry;
-			const msg = msgEntry.message as { role?: string; timestamp?: number };
-			if (msg.role === "user" && typeof msg.timestamp === "number") {
-				existingTimestamps.add(msg.timestamp);
-			}
-		}
-	}
-
-	// Process new log lines
-	const newMessages: Array<{ timestamp: number; message: UserMessage }> = [];
-
-	for (const line of newLines) {
-		try {
-			const logMsg: LogMessage = JSON.parse(line);
-
-			const ts = logMsg.ts;
-			const date = logMsg.date;
-			if (!ts || !date) continue;
-
-			// Skip the current message being processed (will be added via prompt())
-			if (excludeTs && ts === excludeTs) continue;
-
-			// Skip bot messages and user inputs already delivered directly to AgentSession.
-			if (logMsg.isBot || logMsg.skipContextSync) continue;
-
-			const msgTime = new Date(date).getTime() || Date.now();
-
-			// Skip if already in context (crash recovery dedup)
-			if (existingTimestamps.has(msgTime)) continue;
-			existingTimestamps.add(msgTime); // Track within this batch
-
-			const messageText = `[${logMsg.userName || logMsg.user || "unknown"}]: ${logMsg.text || ""}`;
-			newMessages.push({
-				timestamp: msgTime,
-				message: {
-					role: "user",
-					content: [{ type: "text", text: messageText }],
-					timestamp: msgTime,
-				},
-			});
-		} catch {
-			// Skip malformed lines
-		}
-	}
-
-	if (newMessages.length > 0) {
-		newMessages.sort((a, b) => a.timestamp - b.timestamp);
-		for (const { message } of newMessages) {
-			sessionManager.appendMessage(message);
-		}
-	}
-
-	// Update sync offset to current file end
-	writeFileSync(syncOffsetFile, String(fileStats.size));
-
-	return newMessages.length;
-}
 
 // ============================================================================
 // PipiclawSettingsManager - Simple settings for pipiclaw
@@ -227,6 +82,10 @@ export class PipiclawSettingsManager {
 		} catch (error) {
 			console.error(`Warning: Could not save settings file: ${error}`);
 		}
+	}
+
+	reload(): void {
+		this.settings = this.load();
 	}
 
 	getCompactionSettings(): PipiclawCompactionSettings {
@@ -552,10 +411,6 @@ export class PipiclawSettingsManager {
 
 	getProjectSettings(): object {
 		return {};
-	}
-
-	reload(): void {
-		this.settings = this.load();
 	}
 
 	applyOverrides(_overrides: Partial<PipiclawSettings>): void {

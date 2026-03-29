@@ -12,10 +12,11 @@ import {
 import { mkdir, writeFile } from "fs/promises";
 import { basename, join } from "path";
 import { type BuiltInCommand, renderBuiltInHelp } from "./commands.js";
-import { getAgentConfig, getApiKeyForModel, getMemory, getSoul, loadPipiclawSkills } from "./config-loader.js";
-import { PipiclawSettingsManager, syncLogToSessionManager } from "./context.js";
+import { getAgentConfig, getApiKeyForModel, getSoul, loadPipiclawSkills } from "./config-loader.js";
+import { PipiclawSettingsManager } from "./context.js";
 import type { DingTalkContext } from "./dingtalk.js";
 import * as log from "./log.js";
+import { MemoryLifecycle } from "./memory-lifecycle.js";
 import {
 	findExactModelReferenceMatch,
 	formatModelList,
@@ -184,6 +185,7 @@ class ChannelRunner implements AgentRunner {
 	private readonly sessionManager: SessionManager;
 	private readonly settingsManager: PipiclawSettingsManager;
 	private readonly modelRegistry: ModelRegistry;
+	private readonly memoryLifecycle: MemoryLifecycle;
 
 	// --- Mutable across runs ---
 	private activeModel: Model<Api>;
@@ -204,21 +206,10 @@ class ChannelRunner implements AgentRunner {
 		// Create tools
 		const tools = createPipiclawTools(executor);
 
-		// Initial system prompt
-		const soul = getSoul(this.workspaceDir);
-		const agentConfig = getAgentConfig(channelDir);
-		const memory = getMemory(channelDir);
+		// Initial session prompt and skill summaries
 		const initialSkills = loadPipiclawSkills(channelDir, this.workspacePath);
 		this.currentSkills = initialSkills;
-		const systemPrompt = buildSystemPrompt(
-			this.workspacePath,
-			channelId,
-			soul,
-			agentConfig,
-			memory,
-			sandboxConfig,
-			initialSkills,
-		);
+		const systemPrompt = this.buildSessionStartPrompt(initialSkills);
 
 		// Create session manager
 		const contextFile = join(channelDir, "context.jsonl");
@@ -245,17 +236,20 @@ class ChannelRunner implements AgentRunner {
 			getApiKey: async () => getApiKeyForModel(this.modelRegistry, this.activeModel),
 		});
 
-		// Load existing messages
-		const loadedSession = this.sessionManager.buildSessionContext();
-		if (loadedSession.messages.length > 0) {
-			this.agent.replaceMessages(loadedSession.messages);
-			log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
-		}
+		this.memoryLifecycle = new MemoryLifecycle({
+			channelId: this.channelId,
+			channelDir: this.channelDir,
+			getMessages: () => this.session.messages,
+			getSessionEntries: () => this.sessionManager.getBranch(),
+			getModel: () => this.session.model ?? this.activeModel,
+			resolveApiKey: async (model) => getApiKeyForModel(this.modelRegistry, model),
+		});
 
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: process.cwd(),
 			agentDir: APP_HOME_DIR,
 			settingsManager: this.settingsManager as any,
+			extensionFactories: [this.memoryLifecycle.createExtensionFactory()],
 			skillsOverride: (base) => ({
 				skills: [...base.skills, ...this.currentSkills],
 				diagnostics: base.diagnostics,
@@ -309,40 +303,6 @@ class ChannelRunner implements AgentRunner {
 			// Ensure channel directory exists
 			await mkdir(this.channelDir, { recursive: true });
 
-			// Update system prompt and runtime resources with fresh config
-			const soul = getSoul(this.workspaceDir);
-			const agentConfig = getAgentConfig(this.channelDir);
-			const memory = getMemory(this.channelDir);
-			const skills = loadPipiclawSkills(this.channelDir, this.workspacePath);
-			this.currentSkills = skills;
-			const systemPrompt = buildSystemPrompt(
-				this.workspacePath,
-				this.channelId,
-				soul,
-				agentConfig,
-				memory,
-				this.sandboxConfig,
-				skills,
-			);
-			this.session.agent.setSystemPrompt(systemPrompt);
-			await this.session.reload();
-
-			// Sync messages from log.jsonl
-			const syncedCount = syncLogToSessionManager(this.sessionManager, this.channelDir, ctx.message.ts);
-			if (syncedCount > 0) {
-				log.logInfo(`[${this.channelId}] Synced ${syncedCount} messages from log.jsonl`);
-			}
-
-			// Reload messages from context.jsonl
-			const reloadedSession = this.sessionManager.buildSessionContext();
-			if (reloadedSession.messages.length > 0) {
-				this.agent.replaceMessages(reloadedSession.messages);
-				log.logInfo(`[${this.channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
-			}
-
-			// Log context info
-			log.logInfo(`Context sizes - system: ${systemPrompt.length} chars, memory: ${memory.length} chars`);
-
 			// Build user message with timestamp and username prefix
 			const now = new Date();
 			const pad = (n: number) => n.toString().padStart(2, "0");
@@ -356,7 +316,7 @@ class ChannelRunner implements AgentRunner {
 			// Debug: write context to last_prompt.json (only with PIPICLAW_DEBUG=1)
 			if (process.env.PIPICLAW_DEBUG) {
 				const debugContext = {
-					systemPrompt,
+					systemPrompt: this.agent.state.systemPrompt,
 					messages: this.session.messages,
 					newUserMessage: userMessage,
 				};
@@ -444,6 +404,9 @@ class ChannelRunner implements AgentRunner {
 					return;
 				case "new": {
 					const completed = await this.session.newSession();
+					if (completed) {
+						await this.applySessionStartConfiguration();
+					}
 					await this.sendCommandReply(
 						ctx,
 						completed ? `已开启新会话。\n\nSession ID: \`${this.session.sessionId}\`` : "新会话已取消。",
@@ -584,6 +547,19 @@ class ChannelRunner implements AgentRunner {
 			userName: ctx.message.userName,
 			channelName: ctx.channelName,
 		};
+	}
+
+	private buildSessionStartPrompt(skills: Skill[]): string {
+		const soul = getSoul(this.workspaceDir);
+		const agentConfig = getAgentConfig(this.channelDir);
+		return buildSystemPrompt(this.workspacePath, this.channelId, soul, agentConfig, this.sandboxConfig, skills);
+	}
+
+	private async applySessionStartConfiguration(): Promise<void> {
+		const skills = loadPipiclawSkills(this.channelDir, this.workspacePath);
+		this.currentSkills = skills;
+		this.session.agent.setSystemPrompt(this.buildSessionStartPrompt(skills));
+		await this.session.reload();
 	}
 
 	// === Session event subscription ===

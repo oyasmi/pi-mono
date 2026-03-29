@@ -44,7 +44,8 @@ export class ChannelStore {
 	}
 
 	/**
-	 * Log a message to the channel's log.jsonl
+	 * Log a message to the channel's log.jsonl raw archive.
+	 * This file is cold storage and is not proactively loaded into memory context.
 	 * Returns false if message was already logged (duplicate)
 	 */
 	async logMessage(channelId: string, message: LoggedMessage): Promise<boolean> {

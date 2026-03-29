@@ -90,9 +90,13 @@ Example topics you may want to define:
 Replace this template with your actual operating instructions.
 `;
 
-const DEFAULT_MEMORY = `# 工作记忆
+const DEFAULT_MEMORY = `# Workspace Memory
 
-（尚无记录）
+This file is stable workspace-level memory.
+
+- It is intended to be managed by a human administrator.
+- Pipiclaw does not automatically rewrite this file during normal memory consolidation.
+- Store durable shared background here when it should apply across channels.
 `;
 
 const CHANNEL_CONFIG_TEMPLATE = {

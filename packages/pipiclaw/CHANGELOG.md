@@ -11,6 +11,8 @@
 - Periodic memory consolidation event template in README
 - DingTalk channel now intercepts `/help`, `/new`, `/compact`, `/session`, and `/model` as built-in slash commands instead of sending them to the LLM
 - DingTalk channel now supports busy-time steering controls: plain messages default to steer, and `/steer`, `/followup`, and `/stop` are handled directly while a task is running
+- Channel-level `HISTORY.md` for runtime-managed summarized history
+- Runtime memory consolidation pipeline for channel `MEMORY.md` and `HISTORY.md`
 
 ### Changed
 
@@ -31,3 +33,7 @@
 - Auto-generated `models.json` now starts as an empty valid config, and `SOUL.md` / `AGENTS.md` are guidance templates instead of prefilled behavior
 - Global pipiclaw settings now live in `~/.pi/pipiclaw/settings.json`, and saved default models are restored on restart
 - DingTalk channel configuration is now read from `~/.pi/pipiclaw/channel.json`
+- Workspace `SOUL.md` and `AGENTS.md` now load only at session start instead of every turn
+- Workspace and channel memory files are no longer injected into the system prompt by default
+- `log.jsonl` and `context.jsonl` are now treated as cold raw storage and are no longer proactively scanned for memory/context loading
+- Auto-compaction is disabled in pipiclaw runtime; memory consolidation now runs before manual compaction or session trimming

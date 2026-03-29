@@ -1,6 +1,6 @@
 /**
  * Configuration file loaders for pipiclaw workspace files:
- * SOUL.md, AGENTS.md, MEMORY.md, skills/, and API key resolution.
+ * SOUL.md, AGENTS.md, skills/, and API key resolution.
  */
 
 import type { Api, Model } from "@mariozechner/pi-ai";
@@ -28,84 +28,21 @@ export function getSoul(workspaceDir: string): string {
 
 /**
  * Load AGENTS.md — defines the agent's behavior instructions, capabilities, and constraints.
- * Supports both global (workspace root) and channel-level override.
+ * Only loaded from workspace root (global).
  */
 export function getAgentConfig(channelDir: string): string {
-	const parts: string[] = [];
-
-	// Read workspace-level AGENTS.md (global)
 	const workspaceAgentPath = join(channelDir, "..", "AGENTS.md");
 	if (existsSync(workspaceAgentPath)) {
 		try {
 			const content = readFileSync(workspaceAgentPath, "utf-8").trim();
 			if (content) {
-				parts.push(content);
+				return content;
 			}
 		} catch (error) {
 			log.logWarning("Failed to read workspace AGENTS.md", `${workspaceAgentPath}: ${error}`);
 		}
 	}
-
-	// Read channel-specific AGENTS.md (overrides/extends global)
-	const channelAgentPath = join(channelDir, "AGENTS.md");
-	if (existsSync(channelAgentPath)) {
-		try {
-			const content = readFileSync(channelAgentPath, "utf-8").trim();
-			if (content) {
-				parts.push(content);
-			}
-		} catch (error) {
-			log.logWarning("Failed to read channel AGENTS.md", `${channelAgentPath}: ${error}`);
-		}
-	}
-
-	return parts.join("\n\n");
-}
-
-/**
- * Load MEMORY.md — persistent working memory, both global and channel-specific.
- */
-export function getMemory(channelDir: string): string {
-	const parts: string[] = [];
-
-	// Read workspace-level memory (shared across all channels)
-	const workspaceMemoryPath = join(channelDir, "..", "MEMORY.md");
-	if (existsSync(workspaceMemoryPath)) {
-		try {
-			const content = readFileSync(workspaceMemoryPath, "utf-8").trim();
-			if (content) {
-				parts.push(`### Global Workspace Memory\n${content}`);
-			}
-		} catch (error) {
-			log.logWarning("Failed to read workspace memory", `${workspaceMemoryPath}: ${error}`);
-		}
-	}
-
-	// Read channel-specific memory
-	const channelMemoryPath = join(channelDir, "MEMORY.md");
-	if (existsSync(channelMemoryPath)) {
-		try {
-			const content = readFileSync(channelMemoryPath, "utf-8").trim();
-			if (content) {
-				parts.push(`### Channel-Specific Memory\n${content}`);
-			}
-		} catch (error) {
-			log.logWarning("Failed to read channel memory", `${channelMemoryPath}: ${error}`);
-		}
-	}
-
-	if (parts.length === 0) {
-		return "(no working memory yet)";
-	}
-
-	const combined = parts.join("\n\n");
-
-	// Warn if memory is getting too large (consumes system prompt token budget)
-	if (combined.length > 5000) {
-		return `\u26a0\ufe0f Memory is large (${combined.length} chars). Consolidate: remove outdated entries, merge duplicates, tighten descriptions.\n\n${combined}`;
-	}
-
-	return combined;
+	return "";
 }
 
 /**

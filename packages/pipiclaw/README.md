@@ -1,6 +1,6 @@
 # pipiclaw
 
-Pipiclaw 是一个接入钉钉的 AI Card 机器人，把 [pi-coding-agent](../coding-agent) 带到钉钉对话里，支持过程性 AI 卡片、最终 Markdown 回复、内置 Slash 命令、技能扩展和定时事件。
+Pipiclaw 是一个 AI 智能体，把 [pi-coding-agent](../coding-agent) 带到钉钉对话里，支持过程性 AI 卡片、最终 Markdown 回复、内置 Slash 命令、技能扩展和定时事件。
 
 ## 功能
 
@@ -9,8 +9,9 @@ Pipiclaw 是一个接入钉钉的 AI Card 机器人，把 [pi-coding-agent](../c
 - 内置 Slash 命令：`/help`、`/new`、`/compact`、`/session`、`/model`
 - 忙碌时默认将普通新消息作为 steer 送入当前任务，也支持显式 `/steer`、`/followup`、`/stop`
 - 每个 DM / 群聊独立工作空间
-- 支持全局和频道级 `SOUL.md`、`AGENTS.md`、`MEMORY.md`
+- 支持 workspace 级 `SOUL.md`、`AGENTS.md`、`MEMORY.md`
 - 支持全局和频道级技能目录
+- 支持 runtime-managed 的频道级 `MEMORY.md` / `HISTORY.md`
 - 支持 immediate / one-shot / periodic 定时事件
 - 支持自定义模型配置和模型切换
 
@@ -192,6 +193,7 @@ Pipiclaw 只会自动识别并使用下面这些 workspace 文件或目录：
 - `SOUL.md`
 - `AGENTS.md`
 - `MEMORY.md`
+- `HISTORY.md`
 - `skills/`
 - `events/`
 
@@ -208,23 +210,26 @@ Pipiclaw 同时支持：
 
 | 名称 | 全局位置 | 渠道级位置 | 生效方式 |
 |------|----------|------------|----------|
-| `SOUL.md` | `workspace/SOUL.md` | 不支持 | 仅使用全局文件。渠道级 `SOUL.md` 不会被读取。 |
-| `AGENTS.md` | `workspace/AGENTS.md` | `<channel>/AGENTS.md` | 叠加。先读取全局，再追加渠道级，不是替换。 |
-| `MEMORY.md` | `workspace/MEMORY.md` | `<channel>/MEMORY.md` | 合并。全局记忆和渠道记忆都会一起进入上下文。 |
-| `skills/` | `workspace/skills/` | `<channel>/skills/` | 合并。两边的技能都会加载；如果同名，渠道级覆盖全局。 |
+| `SOUL.md` | `workspace/SOUL.md` | 不支持 | 仅在 session 开始时加载全局文件。渠道级 `SOUL.md` 不会被读取。 |
+| `AGENTS.md` | `workspace/AGENTS.md` | 不支持 | 仅在 session 开始时加载全局文件。渠道级 `AGENTS.md` 不会被读取。 |
+| `MEMORY.md` | `workspace/MEMORY.md` | `<channel>/MEMORY.md` | 默认都不会直接加载进上下文。workspace 文件稳定且由管理员维护；channel 文件由 runtime consolidation 自动更新，也允许 agent 主动读写。 |
+| `HISTORY.md` | 不支持 | `<channel>/HISTORY.md` | 默认不会直接加载进上下文。由 runtime consolidation 自动维护，用于按需读取旧摘要。 |
+| `skills/` | `workspace/skills/` | `<channel>/skills/` | 两边的 skill 摘要会在 session 开始时进入上下文；如果同名，渠道级覆盖全局。具体 skill 内容仍由 agent 按需读取。 |
 | `events/` | `workspace/events/` | 不支持 | 仅支持全局事件目录。 |
 | `.channel-meta.json` | 不支持 | `<channel>/.channel-meta.json` | 运行时自动维护，用于主动发送和重启恢复，不建议手工编辑。 |
-| `context.jsonl` | 不支持 | `<channel>/context.jsonl` | 运行时自动维护，保存结构化上下文。 |
-| `log.jsonl` | 不支持 | `<channel>/log.jsonl` | 运行时自动维护，保存消息历史。 |
+| `context.jsonl` | 不支持 | `<channel>/context.jsonl` | 原始 session 存储，冷文件，不主动加载或扫描。 |
+| `log.jsonl` | 不支持 | `<channel>/log.jsonl` | 原始消息存储，冷文件，不主动加载或扫描。 |
 
 ### File Intent
 
 - `SOUL.md`
   定义 Pipiclaw 的身份、语气、默认语言和回复风格。首次运行生成的只是说明模板，你需要替换成真实内容。
 - `AGENTS.md`
-  定义行为规则、工具使用策略、安全约束和项目工作流。全局文件定义通用规则，渠道级文件补充该渠道的特定规则。
+  定义行为规则、工具使用策略、安全约束和项目工作流。只读取 workspace 级文件。
 - `MEMORY.md`
-  定义持久记忆。适合存长期偏好、项目背景、联系人信息、长期约束等。
+  定义持久记忆。workspace 级文件适合存稳定共享背景，由管理员维护；channel 级文件适合存 durable facts、ongoing work、decisions、open loops，并由 runtime consolidation 自动维护。
+- `HISTORY.md`
+  仅存在于 channel 目录。保存旧上下文的摘要历史，由 runtime consolidation 自动维护。
 - `skills/`
   存放自定义技能。适合放可复用的 CLI 工具、脚本和 skill 说明。
 - `events/`
@@ -245,13 +250,37 @@ Pipiclaw 同时支持：
     ├── skills/
     ├── events/
     └── dm_{userId}/
-        ├── AGENTS.md
         ├── MEMORY.md
+        ├── HISTORY.md
         ├── .channel-meta.json
         ├── context.jsonl
         ├── log.jsonl
         └── skills/
 ```
+
+## 记忆模型
+
+Pipiclaw 的默认 session 上下文只直接加载这些内容：
+
+- workspace 级 `SOUL.md`
+- workspace 级 `AGENTS.md`
+- 内置工具说明
+- workspace 和 channel 两层 skills 的摘要
+
+这些文件不会默认直接进入上下文：
+
+- `workspace/MEMORY.md`
+- `<channel>/MEMORY.md`
+- `<channel>/HISTORY.md`
+- `<channel>/log.jsonl`
+- `<channel>/context.jsonl`
+
+说明：
+
+- `workspace/MEMORY.md` 是稳定共享背景，由管理员维护，runtime 不会自动改写。
+- `<channel>/MEMORY.md` 和 `<channel>/HISTORY.md` 由 runtime 在 compaction 或 session trimming 前自动 consolidation。
+- agent 被鼓励在需要时主动读取 channel memory/history。
+- `log.jsonl` 和 `context.jsonl` 是冷存储，只做原始归档，不承担记忆角色。
 
 ## 定时事件
 
