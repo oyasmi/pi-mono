@@ -94,6 +94,7 @@ export interface Executor {
 export interface ExecOptions {
 	timeout?: number;
 	signal?: AbortSignal;
+	stdin?: string;
 }
 
 export interface ExecResult {
@@ -107,15 +108,47 @@ class HostExecutor implements Executor {
 		return new Promise((resolve, reject) => {
 			const shell = process.platform === "win32" ? "cmd" : "sh";
 			const shellArgs = process.platform === "win32" ? ["/c"] : ["-c"];
+			const child = (() => {
+				try {
+					return spawn(shell, [...shellArgs, command], {
+						detached: true,
+						stdio: ["pipe", "pipe", "pipe"],
+					});
+				} catch (err) {
+					reject(err instanceof Error ? err : new Error(String(err)));
+					return null;
+				}
+			})();
 
-			const child = spawn(shell, [...shellArgs, command], {
-				detached: true,
-				stdio: ["ignore", "pipe", "pipe"],
-			});
+			if (!child) {
+				return;
+			}
 
 			let stdout = "";
 			let stderr = "";
 			let timedOut = false;
+			let settled = false;
+
+			const cleanup = () => {
+				if (timeoutHandle) clearTimeout(timeoutHandle);
+				if (options?.signal) {
+					options.signal.removeEventListener("abort", onAbort);
+				}
+			};
+
+			const rejectOnce = (err: Error) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				reject(err);
+			};
+
+			const resolveOnce = (result: ExecResult) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				resolve(result);
+			};
 
 			const timeoutHandle =
 				options?.timeout && options.timeout > 0
@@ -151,24 +184,35 @@ class HostExecutor implements Executor {
 				}
 			});
 
-			child.on("close", (code) => {
-				if (timeoutHandle) clearTimeout(timeoutHandle);
-				if (options?.signal) {
-					options.signal.removeEventListener("abort", onAbort);
-				}
+			child.on("error", (err) => {
+				rejectOnce(err instanceof Error ? err : new Error(String(err)));
+			});
 
+			child.on("close", (code) => {
 				if (options?.signal?.aborted) {
-					reject(new Error(`${stdout}\n${stderr}\nCommand aborted`.trim()));
+					rejectOnce(new Error(`${stdout}\n${stderr}\nCommand aborted`.trim()));
 					return;
 				}
 
 				if (timedOut) {
-					reject(new Error(`${stdout}\n${stderr}\nCommand timed out after ${options?.timeout} seconds`.trim()));
+					rejectOnce(
+						new Error(`${stdout}\n${stderr}\nCommand timed out after ${options?.timeout} seconds`.trim()),
+					);
 					return;
 				}
 
-				resolve({ stdout, stderr, code: code ?? 0 });
+				resolveOnce({ stdout, stderr, code: code ?? 0 });
 			});
+
+			if (options?.stdin !== undefined) {
+				child.stdin?.on("error", (err) => {
+					if ((err as NodeJS.ErrnoException).code === "EPIPE") return;
+					rejectOnce(err instanceof Error ? err : new Error(String(err)));
+				});
+				child.stdin?.end(options.stdin);
+			} else {
+				child.stdin?.end();
+			}
 		});
 	}
 
@@ -182,7 +226,8 @@ class DockerExecutor implements Executor {
 
 	async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
 		// Wrap command for docker exec
-		const dockerCmd = `docker exec ${this.container} sh -c ${shellEscape(command)}`;
+		const interactive = options?.stdin !== undefined ? "-i " : "";
+		const dockerCmd = `docker exec ${interactive}${this.container} sh -c ${shellEscape(command)}`;
 		const hostExecutor = new HostExecutor();
 		return hostExecutor.exec(dockerCmd, options);
 	}

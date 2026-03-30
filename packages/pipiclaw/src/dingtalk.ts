@@ -99,8 +99,10 @@ type QueuedWork = () => Promise<void>;
 class ChannelQueue {
 	private queue: QueuedWork[] = [];
 	private processing = false;
+	private stopped = false;
 
 	enqueue(work: QueuedWork): void {
+		if (this.stopped) return;
 		this.queue.push(work);
 		this.processNext();
 	}
@@ -110,7 +112,7 @@ class ChannelQueue {
 	}
 
 	private async processNext(): Promise<void> {
-		if (this.processing || this.queue.length === 0) return;
+		if (this.processing || this.stopped || this.queue.length === 0) return;
 		this.processing = true;
 		const work = this.queue.shift()!;
 		try {
@@ -120,6 +122,11 @@ class ChannelQueue {
 		}
 		this.processing = false;
 		this.processNext();
+	}
+
+	stop(): void {
+		this.stopped = true;
+		this.queue = [];
 	}
 }
 
@@ -338,13 +345,21 @@ export class DingTalkBot {
 		}
 	}
 
-	stop() {
+	async stop(): Promise<void> {
+		log.logInfo("DingTalk: stopping bot");
 		this.isStopped = true;
 		if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
+		for (const queue of this.queues.values()) {
+			queue.stop();
+		}
 		if (this.client) {
 			try {
-				(this.client as any).disconnect();
-			} catch (_e) {}
+				await Promise.resolve((this.client as any).disconnect?.());
+			} catch (err) {
+				log.logWarning("DingTalk: failed to disconnect cleanly", err instanceof Error ? err.message : String(err));
+			} finally {
+				this.client = null;
+			}
 		}
 	}
 
@@ -353,6 +368,9 @@ export class DingTalkBot {
 	 * Returns true if enqueued, false if queue is full (max 5).
 	 */
 	enqueueEvent(event: DingTalkEvent): boolean {
+		if (this.isStopped) {
+			return false;
+		}
 		const queue = this.getQueue(event.channelId);
 		if (queue.size() >= 5) {
 			log.logWarning(`Event queue full for ${event.channelId}, discarding: ${event.text.substring(0, 50)}`);
@@ -694,6 +712,10 @@ export class DingTalkBot {
 	}
 
 	private async onStreamMessage(data: RobotMessage): Promise<void> {
+		if (this.isStopped) {
+			return;
+		}
+
 		const content = this.extractContent(data);
 		const senderId = data.senderStaffId || data.senderId || "";
 		const senderName = data.senderNick || "Unknown";

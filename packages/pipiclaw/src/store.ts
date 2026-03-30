@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync } from "fs";
+import { closeSync, existsSync, mkdirSync, openSync, readSync, renameSync, statSync } from "fs";
 import { appendFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 
@@ -121,14 +121,61 @@ export class ChannelStore {
 		}
 
 		try {
-			const content = readFileSync(logPath, "utf-8");
-			const lines = content.trim().split("\n");
-			if (lines.length === 0 || lines[0] === "") {
+			const stats = statSync(logPath);
+			if (stats.size === 0) {
 				return null;
 			}
-			const lastLine = lines[lines.length - 1];
-			const message = JSON.parse(lastLine) as LoggedMessage;
-			return message.ts;
+
+			const fd = openSync(logPath, "r");
+			try {
+				let end = stats.size;
+				const trailing = Buffer.alloc(1);
+				while (end > 0) {
+					readSync(fd, trailing, 0, 1, end - 1);
+					if (trailing[0] !== 0x0a && trailing[0] !== 0x0d) {
+						break;
+					}
+					end--;
+				}
+
+				if (end === 0) {
+					return null;
+				}
+
+				const chunkSize = 4096;
+				const buffer = Buffer.alloc(chunkSize);
+				let lineStart = 0;
+				let position = end;
+
+				while (position > 0) {
+					const bytesToRead = Math.min(chunkSize, position);
+					position -= bytesToRead;
+					readSync(fd, buffer, 0, bytesToRead, position);
+
+					const newlineIndex = buffer.subarray(0, bytesToRead).lastIndexOf(0x0a);
+					if (newlineIndex !== -1) {
+						lineStart = position + newlineIndex + 1;
+						break;
+					}
+				}
+
+				const lineLength = end - lineStart;
+				if (lineLength <= 0) {
+					return null;
+				}
+
+				const lineBuffer = Buffer.alloc(lineLength);
+				readSync(fd, lineBuffer, 0, lineLength, lineStart);
+				const lastLine = lineBuffer.toString("utf-8").replace(/\r+$/, "");
+				if (!lastLine) {
+					return null;
+				}
+
+				const message = JSON.parse(lastLine) as LoggedMessage;
+				return message.ts;
+			} finally {
+				closeSync(fd);
+			}
 		} catch {
 			return null;
 		}

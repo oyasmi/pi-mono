@@ -34,7 +34,7 @@ export interface AgentRunner {
 	handleBuiltinCommand(ctx: DingTalkContext, command: BuiltInCommand): Promise<void>;
 	queueSteer(text: string, userName?: string): Promise<void>;
 	queueFollowUp(text: string, userName?: string): Promise<void>;
-	abort(): void;
+	abort(): Promise<void>;
 }
 
 type FinalOutcome = { kind: "none" } | { kind: "silent" } | { kind: "final"; text: string };
@@ -230,7 +230,7 @@ class ChannelRunner implements AgentRunner {
 
 		// Create AuthStorage and ModelRegistry
 		const authStorage = AuthStorage.create(AUTH_CONFIG_PATH);
-		this.modelRegistry = new ModelRegistry(authStorage, MODELS_CONFIG_PATH);
+		this.modelRegistry = ModelRegistry.create(authStorage, MODELS_CONFIG_PATH);
 
 		// Resolve model: prefer saved global default, fall back to first available model
 		this.activeModel = resolveInitialModel(this.modelRegistry, this.settingsManager);
@@ -476,8 +476,8 @@ class ChannelRunner implements AgentRunner {
 		await this.queueBusyMessage("followUp", this.requireQueuedMessage(text, "followup"), userName);
 	}
 
-	abort(): void {
-		this.session.abort();
+	async abort(): Promise<void> {
+		await this.session.abort();
 	}
 
 	// === Private helpers ===

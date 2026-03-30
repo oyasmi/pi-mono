@@ -295,6 +295,11 @@ interface ChannelState {
 }
 
 const channelStates = new Map<string, ChannelState>();
+const activeTasks = new Set<Promise<void>>();
+const SHUTDOWN_WAIT_MS = 15000;
+const SHUTDOWN_ABORT_WAIT_MS = 5000;
+let shuttingDown = false;
+let shutdownPromise: Promise<void> | null = null;
 
 function getState(channelId: string): ChannelState {
 	let state = channelStates.get(channelId);
@@ -322,7 +327,9 @@ const handler: DingTalkHandler = {
 		const state = channelStates.get(channelId);
 		if (state?.running) {
 			state.stopRequested = true;
-			state.runner.abort();
+			void state.runner.abort().catch((err) => {
+				log.logWarning(`[${channelId}] Failed to abort run`, err instanceof Error ? err.message : String(err));
+			});
 			log.logInfo(`[${channelId}] Stop requested`);
 		}
 	},
@@ -333,6 +340,10 @@ const handler: DingTalkHandler = {
 		mode: BusyMessageMode,
 		queueText: string,
 	): Promise<void> {
+		if (shuttingDown) {
+			return;
+		}
+
 		const state = getState(event.channelId);
 		const trimmedQueueText = queueText.trim();
 
@@ -370,40 +381,53 @@ const handler: DingTalkHandler = {
 	},
 
 	async handleEvent(event: DingTalkEvent, bot: DingTalkBot, _isEvent?: boolean): Promise<void> {
+		if (shuttingDown) {
+			log.logInfo(`[${event.channelId}] Ignoring event during shutdown`);
+			return;
+		}
+
 		const state = getState(event.channelId);
+		const task = (async () => {
+			state.running = true;
+			state.stopRequested = false;
 
-		state.running = true;
-		state.stopRequested = false;
+			await state.store.logMessage(event.channelId, {
+				date: new Date().toISOString(),
+				ts: event.ts,
+				user: event.user,
+				userName: event.userName,
+				text: event.text,
+				isBot: false,
+			});
 
-		await state.store.logMessage(event.channelId, {
-			date: new Date().toISOString(),
-			ts: event.ts,
-			user: event.user,
-			userName: event.userName,
-			text: event.text,
-			isBot: false,
-		});
+			try {
+				const ctx = createDingTalkContext(event, bot, state.store);
+				const builtInCommand = parseBuiltInCommand(event.text);
 
+				if (builtInCommand) {
+					log.logInfo(`[${event.channelId}] Executing command: ${builtInCommand.rawText}`);
+					await state.runner.handleBuiltinCommand(ctx, builtInCommand);
+					return;
+				}
+
+				log.logInfo(`[${event.channelId}] Starting run: ${event.text.substring(0, 50)}`);
+				const result = await state.runner.run(ctx, state.store);
+
+				if (result.stopReason === "aborted" && state.stopRequested) {
+					log.logInfo(`[${event.channelId}] Stopped`);
+				}
+			} catch (err) {
+				log.logWarning(`[${event.channelId}] Run error`, err instanceof Error ? err.message : String(err));
+			} finally {
+				state.running = false;
+			}
+		})();
+
+		activeTasks.add(task);
 		try {
-			const ctx = createDingTalkContext(event, bot, state.store);
-			const builtInCommand = parseBuiltInCommand(event.text);
-
-			if (builtInCommand) {
-				log.logInfo(`[${event.channelId}] Executing command: ${builtInCommand.rawText}`);
-				await state.runner.handleBuiltinCommand(ctx, builtInCommand);
-				return;
-			}
-
-			log.logInfo(`[${event.channelId}] Starting run: ${event.text.substring(0, 50)}`);
-			const result = await state.runner.run(ctx, state.store);
-
-			if (result.stopReason === "aborted" && state.stopRequested) {
-				log.logInfo(`[${event.channelId}] Stopped`);
-			}
-		} catch (err) {
-			log.logWarning(`[${event.channelId}] Run error`, err instanceof Error ? err.message : String(err));
+			await task;
 		} finally {
-			state.running = false;
+			activeTasks.delete(task);
 		}
 	},
 };
@@ -418,16 +442,76 @@ const bot = new DingTalkBot(handler, dingtalkConfig);
 const eventsWatcher = createEventsWatcher(WORKSPACE_DIR, bot);
 eventsWatcher.start();
 
-process.on("SIGINT", () => {
-	log.logInfo("Shutting down...");
-	eventsWatcher.stop();
-	process.exit(0);
+function waitForTasks(tasks: Promise<void>[], timeoutMs: number): Promise<boolean> {
+	if (tasks.length === 0) {
+		return Promise.resolve(true);
+	}
+
+	return Promise.race([
+		Promise.allSettled(tasks).then(() => true),
+		new Promise<boolean>((resolve) => {
+			setTimeout(() => resolve(false), timeoutMs);
+		}),
+	]);
+}
+
+async function shutdown(signal: NodeJS.Signals): Promise<void> {
+	if (shutdownPromise) {
+		return shutdownPromise;
+	}
+
+	shutdownPromise = (async () => {
+		shuttingDown = true;
+		log.logInfo(`Shutting down (${signal})...`);
+
+		eventsWatcher.stop();
+		await bot.stop();
+
+		const runningTasks = Array.from(activeTasks);
+		if (runningTasks.length > 0) {
+			log.logInfo(`Waiting for ${runningTasks.length} active task(s) to finish`);
+			const completed = await waitForTasks(runningTasks, SHUTDOWN_WAIT_MS);
+
+			if (!completed) {
+				log.logWarning(`Shutdown grace period exceeded ${SHUTDOWN_WAIT_MS}ms, aborting active runs`);
+				const aborts: Promise<void>[] = [];
+				for (const [channelId, state] of channelStates) {
+					if (!state.running) continue;
+					state.stopRequested = true;
+					log.logInfo(`[${channelId}] Aborting active run for shutdown`);
+					aborts.push(
+						state.runner.abort().catch((err) => {
+							log.logWarning(
+								`[${channelId}] Failed to abort run during shutdown`,
+								err instanceof Error ? err.message : String(err),
+							);
+						}),
+					);
+				}
+				await Promise.allSettled(aborts);
+
+				const remainingTasks = Array.from(activeTasks);
+				if (remainingTasks.length > 0) {
+					const abortedCompleted = await waitForTasks(remainingTasks, SHUTDOWN_ABORT_WAIT_MS);
+					if (!abortedCompleted) {
+						log.logWarning(`Shutdown forced exit with ${remainingTasks.length} task(s) still active`);
+					}
+				}
+			}
+		}
+	})().finally(() => {
+		process.exit(0);
+	});
+
+	return shutdownPromise;
+}
+
+process.once("SIGINT", () => {
+	void shutdown("SIGINT");
 });
 
-process.on("SIGTERM", () => {
-	log.logInfo("Shutting down...");
-	eventsWatcher.stop();
-	process.exit(0);
+process.once("SIGTERM", () => {
+	void shutdown("SIGTERM");
 });
 
-bot.start();
+void bot.start();

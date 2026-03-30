@@ -3,6 +3,7 @@ import { Type } from "@sinclair/typebox";
 import * as Diff from "diff";
 import type { Executor } from "../sandbox.js";
 import { shellEscape } from "../shell-escape.js";
+import { writeContent } from "./write-content.js";
 
 /**
  * Generate a unified diff string with line numbers and context
@@ -141,12 +142,7 @@ export function createEditTool(executor: Executor): AgentTool<typeof editSchema>
 			}
 
 			// Write the file back
-			const writeResult = await executor.exec(`printf '%s' ${shellEscape(newContent)} > ${shellEscape(path)}`, {
-				signal,
-			});
-			if (writeResult.code !== 0) {
-				throw new Error(writeResult.stderr || `Failed to write file: ${path}`);
-			}
+			await writeContent(executor, path, newContent, signal);
 
 			return {
 				content: [

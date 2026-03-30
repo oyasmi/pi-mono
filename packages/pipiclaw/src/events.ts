@@ -39,6 +39,7 @@ export type ScheduledEvent = ImmediateEvent | OneShotEvent | PeriodicEvent;
 const DEBOUNCE_MS = 100;
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 100;
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 export class EventsWatcher {
 	private timers: Map<string, NodeJS.Timeout> = new Map();
@@ -259,6 +260,12 @@ export class EventsWatcher {
 		const atTime = new Date(event.at).getTime();
 		const now = Date.now();
 
+		if (!Number.isFinite(atTime)) {
+			log.logWarning(`Invalid one-shot time for ${filename}: ${event.at}`);
+			this.deleteFile(filename);
+			return;
+		}
+
 		if (atTime <= now) {
 			log.logInfo(`One-shot event in the past, deleting: ${filename}`);
 			this.deleteFile(filename);
@@ -266,6 +273,14 @@ export class EventsWatcher {
 		}
 
 		const delay = atTime - now;
+		if (delay > MAX_TIMEOUT_MS) {
+			log.logWarning(
+				`One-shot event exceeds maximum supported delay for ${filename}: ${event.at}. Use a periodic cron event instead.`,
+			);
+			this.deleteFile(filename);
+			return;
+		}
+
 		log.logInfo(`Scheduling one-shot event: ${filename} in ${Math.round(delay / 1000)}s`);
 
 		const timer = setTimeout(() => {
