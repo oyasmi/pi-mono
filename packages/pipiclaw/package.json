@@ -1,6 +1,6 @@
 {
     "name": "@oyasmi/pipiclaw",
-    "version": "0.3.2",
+    "version": "0.3.3",
     "description": "Pipiclaw DingTalk bot powered by the pi coding agent",
     "type": "module",
     "bin": {

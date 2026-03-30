@@ -22,6 +22,7 @@ import {
 	CHANNEL_CONFIG_PATH,
 	MODELS_CONFIG_PATH,
 	SETTINGS_CONFIG_PATH,
+	SUB_AGENTS_DIR,
 	WORKSPACE_DIR,
 } from "./paths.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
@@ -142,7 +143,7 @@ function bootstrapAppHome(): BootstrapResult {
 		created.push("workspace/");
 	}
 
-	for (const dir of ["skills", "events"]) {
+	for (const dir of ["skills", "events", "sub-agents"]) {
 		const dirPath = join(WORKSPACE_DIR, dir);
 		if (!existsSync(dirPath)) {
 			mkdirSync(dirPath, { recursive: true });
@@ -436,6 +437,9 @@ log.logStartup(WORKSPACE_DIR, sandbox.type === "host" ? "host" : `docker:${sandb
 
 if (!existsSync(WORKSPACE_DIR)) {
 	mkdirSync(WORKSPACE_DIR, { recursive: true });
+}
+if (!existsSync(SUB_AGENTS_DIR)) {
+	mkdirSync(SUB_AGENTS_DIR, { recursive: true });
 }
 
 const bot = new DingTalkBot(handler, dingtalkConfig);

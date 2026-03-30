@@ -10,6 +10,7 @@ Pipiclaw 是一个 AI 智能体，把 [pi-coding-agent](../coding-agent) 带到�
 - 忙碌时默认将普通新消息作为 steer 送入当前任务，也支持显式 `/steer`、`/followup`、`/stop`
 - 每个 DM / 群聊独立工作空间
 - 支持 workspace 级 `SOUL.md`、`AGENTS.md`、`MEMORY.md`
+- 支持 workspace 级 `sub-agents/` 预定义子代理目录
 - 支持全局和频道级技能目录
 - 支持 runtime-managed 的频道级 `MEMORY.md` / `HISTORY.md`
 - 支持 immediate / one-shot / periodic 定时事件
@@ -35,6 +36,7 @@ pipiclaw
 - `settings.json`
 - `workspace/`
 - `workspace/events/`
+- `workspace/sub-agents/`
 - `workspace/skills/`
 - `workspace/SOUL.md`
 - `workspace/AGENTS.md`
@@ -196,6 +198,7 @@ Pipiclaw 只会自动识别并使用下面这些 workspace 文件或目录：
 - `SOUL.md`
 - `AGENTS.md`
 - `MEMORY.md`
+- `sub-agents/`
 - `skills/`
 - `events/`
 
@@ -215,6 +218,7 @@ Pipiclaw 同时支持：
 | `SOUL.md` | `workspace/SOUL.md` | 不支持 | 仅在 session 开始时加载全局文件。渠道级 `SOUL.md` 不会被读取。 |
 | `AGENTS.md` | `workspace/AGENTS.md` | 不支持 | 仅在 session 开始时加载全局文件。渠道级 `AGENTS.md` 不会被读取。 |
 | `MEMORY.md` | `workspace/MEMORY.md` | `<channel>/MEMORY.md` | 默认都不会直接加载进上下文。workspace 文件稳定且由管理员维护；channel 文件由 runtime consolidation 自动更新，也允许 agent 主动读写。 |
+| `sub-agents/` | `workspace/sub-agents/` | 不支持 | 预定义 sub-agent 目录。主 Agent 可按需调用其中的定义，也可以在单次任务里临时内联定义一个 sub-agent。 |
 | `HISTORY.md` | 不支持 | `<channel>/HISTORY.md` | 默认不会直接加载进上下文。由 runtime consolidation 自动维护，用于按需读取旧摘要。 |
 | `skills/` | `workspace/skills/` | `<channel>/skills/` | 两边的 skill 摘要会在 session 开始时进入上下文；如果同名，渠道级覆盖全局。具体 skill 内容仍由 agent 按需读取。 |
 | `events/` | `workspace/events/` | 不支持 | 仅支持全局事件目录。 |
@@ -230,6 +234,8 @@ Pipiclaw 同时支持：
   定义行为规则、工具使用策略、安全约束和项目工作流。只读取 workspace 级文件。不要把 runtime 内建的记忆系统细节完整复制到这里。
 - `MEMORY.md`
   定义持久记忆。workspace 级文件适合存稳定共享背景，由管理员维护；channel 级文件适合存 durable facts、ongoing work、decisions、open loops，并由 runtime consolidation 自动维护。
+- `sub-agents/`
+  存放预定义 sub-agent Markdown 文件。适合放 reviewer、researcher、planner 之类可复用的专项角色。主 Agent 在需要时也可以不依赖该目录，直接临时内联定义一个 sub-agent。
 - `HISTORY.md`
   仅存在于 channel 目录。保存旧上下文的摘要历史，由 runtime consolidation 自动维护。
 - `skills/`
@@ -249,6 +255,7 @@ Pipiclaw 同时支持：
     ├── SOUL.md
     ├── AGENTS.md
     ├── MEMORY.md
+    ├── sub-agents/
     ├── skills/
     ├── events/
     └── dm_{userId}/
@@ -267,6 +274,7 @@ Pipiclaw 的默认 session 上下文只直接加载这些内容：
 - pi 默认底座 system prompt
 - workspace 级 `SOUL.md`
 - workspace 级 `AGENTS.md`
+- workspace 级 `sub-agents/` 中可用 sub-agent 的摘要
 - 内置工具说明
 - workspace 和 channel 两层 skills 的摘要
 
@@ -305,6 +313,53 @@ Pipiclaw 的默认 session 上下文只直接加载这些内容：
   "timezone": "Asia/Shanghai"
 }
 ```
+
+## Sub-Agents
+
+Pipiclaw 支持两种 sub-agent 用法：
+
+- 预定义 sub-agent：放在 `~/.pi/pipiclaw/workspace/sub-agents/*.md`
+- 临时内联 sub-agent：主 Agent 在一次 `subagent` 工具调用里直接组织参数定义
+
+推荐先从预定义 sub-agent 开始，因为更容易复用，也更容易调试。
+
+### 定义文件示例
+
+文件：`~/.pi/pipiclaw/workspace/sub-agents/reviewer.md`
+
+```md
+---
+name: reviewer
+description: Review code changes for correctness, regressions, and missing tests
+model: anthropic/claude-sonnet-4-5
+tools: read,bash
+maxTurns: 4
+maxToolCalls: 12
+maxWallTimeSec: 180
+bashTimeoutSec: 45
+---
+
+You are a focused code reviewer.
+
+Review the code or task given to you.
+Prioritize correctness issues, regressions, risky assumptions, and missing tests.
+Keep findings concise and actionable.
+```
+
+说明：
+
+- `model` 可省略；省略时默认使用主 Agent 当前模型
+- `tools` 可省略；省略时默认使用 `read,bash`
+- 各预算字段都可省略；省略时会使用 runtime 默认值
+- sub-agent 不会拿到 `subagent` 工具，因此不能再创建孙 agent
+
+### 使用建议
+
+- `reviewer`：代码审查、回归风险检查、测试缺口检查
+- `researcher`：大范围读文件、查日志、收集事实
+- `planner`：先整理范围、再给主 Agent 输出执行计划
+
+主 Agent 会在 prompt 指导下自行决定何时调用 sub-agent；不需要用户每次手工指定。
 
 ## 环境变量
 

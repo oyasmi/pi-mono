@@ -1,11 +1,17 @@
 import type { SandboxConfig } from "./sandbox.js";
 
+export interface AppendSystemPromptOptions {
+	subAgentList?: string;
+}
+
 export function buildAppendSystemPrompt(
 	workspacePath: string,
 	channelId: string,
 	sandboxConfig: SandboxConfig,
+	options: AppendSystemPromptOptions = {},
 ): string {
 	const channelPath = `${workspacePath}/${channelId}`;
+	const subAgentsPath = `${workspacePath}/sub-agents`;
 	const isDocker = sandboxConfig.type === "docker";
 
 	const envDescription = isDocker
@@ -39,6 +45,7 @@ ${workspacePath}/
 ├── SOUL.md                      # Your identity/personality (read-only)
 ├── AGENTS.md                    # Custom behavior instructions (read-only)
 ├── MEMORY.md                    # Stable workspace memory (admin-managed, read on demand)
+├── sub-agents/                  # Predefined sub-agent definitions
 ├── skills/                      # Global CLI tools you create
 ├── events/                      # Scheduled events
 └── ${channelId}/                # This channel
@@ -117,8 +124,36 @@ Update this file whenever you modify the environment.`);
 - edit: Surgical file edits
 - write: Create or overwrite files when needed
 - bash: Run shell commands and external programs
+- subagent: Delegate a focused task to a sub-agent with its own isolated context
 
 Each tool requires a "label" parameter (shown to user).`);
+
+	sections.push(`## Sub-Agents
+You have a \`subagent\` tool for delegating focused work to a separate agent with an isolated context window.
+
+### Predefined Sub-Agents
+Predefined sub-agent definitions live in \`${subAgentsPath}/\`.
+${options.subAgentList ? `Available predefined sub-agents:\n${options.subAgentList}` : "Available predefined sub-agents: none"}
+
+### Temporary Inline Sub-Agents
+If no predefined sub-agent fits, you may define a temporary inline sub-agent directly in the \`subagent\` tool call by providing a focused \`systemPrompt\` plus optional tools, model, and budget settings.
+
+Use sub-agents when:
+- The task can be decomposed into a focused sub-problem
+- You need a fresh context for heavy file reading, shell work, or review
+- A specialized role would produce better results
+- The main conversation has grown long and you want to offload a bounded task
+
+Do not use sub-agents when:
+- The task is simple and direct
+- The task depends heavily on the full current conversation state
+- The task requires frequent user confirmation
+
+Important rules:
+- Sub-agents cannot see your conversation history unless you include the needed context in \`task\`
+- Sub-agents do not receive the \`subagent\` tool, so they cannot create nested agents
+- Prefer predefined sub-agents when one clearly fits
+- Use temporary inline sub-agents only when that extra flexibility is genuinely useful`);
 
 	return sections.join("\n\n");
 }

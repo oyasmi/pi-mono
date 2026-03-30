@@ -26,7 +26,11 @@ interface BashToolDetails {
 	fullOutputPath?: string;
 }
 
-export function createBashTool(executor: Executor): AgentTool<typeof bashSchema> {
+export interface BashToolOptions {
+	defaultTimeoutSeconds?: number;
+}
+
+export function createBashTool(executor: Executor, options: BashToolOptions = {}): AgentTool<typeof bashSchema> {
 	return {
 		name: "bash",
 		label: "bash",
@@ -41,7 +45,8 @@ export function createBashTool(executor: Executor): AgentTool<typeof bashSchema>
 			let tempFilePath: string | undefined;
 			let tempFileStream: ReturnType<typeof createWriteStream> | undefined;
 
-			const result = await executor.exec(command, { timeout, signal });
+			const effectiveTimeout = timeout ?? options.defaultTimeoutSeconds;
+			const result = await executor.exec(command, { timeout: effectiveTimeout, signal });
 			let output = "";
 			if (result.stdout) output += result.stdout;
 			if (result.stderr) {

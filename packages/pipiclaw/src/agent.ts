@@ -23,7 +23,9 @@ import { APP_HOME_DIR, AUTH_CONFIG_PATH, MODELS_CONFIG_PATH } from "./paths.js";
 import { buildAppendSystemPrompt } from "./prompt-builder.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelStore } from "./store.js";
+import { discoverSubAgents, formatSubAgentList } from "./sub-agents.js";
 import { createPipiclawTools } from "./tools/index.js";
+import type { SubAgentToolDetails } from "./tools/subagent.js";
 
 // ============================================================================
 // Types
@@ -119,6 +121,35 @@ function extractToolResultText(result: unknown): string {
 	}
 
 	return JSON.stringify(result);
+}
+
+function isSubAgentToolDetails(value: unknown): value is SubAgentToolDetails {
+	if (!value || typeof value !== "object" || !("usage" in value)) {
+		return false;
+	}
+
+	const usage = (value as { usage?: unknown }).usage;
+	return (
+		!!usage &&
+		typeof usage === "object" &&
+		"input" in usage &&
+		"output" in usage &&
+		"cacheRead" in usage &&
+		"cacheWrite" in usage &&
+		"cost" in usage
+	);
+}
+
+function mergeSubAgentUsage(totalUsage: UsageTotals, details: SubAgentToolDetails): void {
+	totalUsage.input += details.usage.input;
+	totalUsage.output += details.usage.output;
+	totalUsage.cacheRead += details.usage.cacheRead;
+	totalUsage.cacheWrite += details.usage.cacheWrite;
+	totalUsage.cost.input += details.usage.cost.input;
+	totalUsage.cost.output += details.usage.cost.output;
+	totalUsage.cost.cacheRead += details.usage.cost.cacheRead;
+	totalUsage.cost.cacheWrite += details.usage.cost.cacheWrite;
+	totalUsage.cost.total += details.usage.cost.total;
 }
 
 function extractCustomCommandResultText(message: unknown): string | null {
@@ -227,9 +258,6 @@ class ChannelRunner implements AgentRunner {
 		this.workspaceDir = resolve(dirname(channelDir));
 		this.workspacePath = executor.getWorkspacePath(this.workspaceDir);
 
-		// Create tools
-		const tools = createPipiclawTools(executor);
-
 		// Initial skill summaries
 		const initialSkills = loadPipiclawSkills(channelDir, this.workspacePath);
 		this.currentSkills = initialSkills;
@@ -246,6 +274,15 @@ class ChannelRunner implements AgentRunner {
 		// Resolve model: prefer saved global default, fall back to first available model
 		this.activeModel = resolveInitialModel(this.modelRegistry, this.settingsManager);
 		log.logInfo(`Using model: ${this.activeModel.provider}/${this.activeModel.id} (${this.activeModel.name})`);
+
+		// Create tools
+		const tools = createPipiclawTools({
+			executor,
+			getCurrentModel: () => this.activeModel,
+			getAvailableModels: () => this.modelRegistry.getAvailable(),
+			resolveApiKey: async (model) => getApiKeyForModel(this.modelRegistry, model),
+			workspaceDir: this.workspaceDir,
+		});
 
 		// Create agent
 		this.agent = new Agent({
@@ -297,7 +334,12 @@ class ChannelRunner implements AgentRunner {
 				if (soul) {
 					sections.unshift(soul);
 				}
-				sections.push(buildAppendSystemPrompt(this.workspacePath, this.channelId, this.sandboxConfig));
+				const subAgents = discoverSubAgents(this.workspaceDir, this.modelRegistry.getAvailable());
+				sections.push(
+					buildAppendSystemPrompt(this.workspacePath, this.channelId, this.sandboxConfig, {
+						subAgentList: formatSubAgentList(subAgents.agents),
+					}),
+				);
 				return sections;
 			},
 			agentsFilesOverride: () => {
@@ -581,6 +623,16 @@ class ChannelRunner implements AgentRunner {
 
 				log.logToolStart(logCtx, agentEvent.toolName, label, agentEvent.args as Record<string, unknown>);
 				queue.enqueue(() => ctx.respond(formatProgressEntry("tool", label), false), "tool label");
+			} else if (event.type === "tool_execution_update") {
+				const agentEvent = event as { type: "tool_execution_update"; toolName: string; partialResult: unknown };
+				if (agentEvent.toolName !== "subagent") {
+					return;
+				}
+				const partialText = truncate(extractToolResultText(agentEvent.partialResult), 200);
+				if (!partialText.trim()) {
+					return;
+				}
+				queue.enqueue(() => ctx.respond(formatProgressEntry("tool", partialText), false), "tool update");
 			} else if (event.type === "tool_execution_end") {
 				const agentEvent = event as any & { type: "tool_execution_end" };
 				const resultStr = extractToolResultText(agentEvent.result);
@@ -593,6 +645,19 @@ class ChannelRunner implements AgentRunner {
 					log.logToolError(logCtx, agentEvent.toolName, durationMs, resultStr);
 				} else {
 					log.logToolSuccess(logCtx, agentEvent.toolName, durationMs, resultStr);
+				}
+
+				if (
+					agentEvent.toolName === "subagent" &&
+					agentEvent.result &&
+					typeof agentEvent.result === "object" &&
+					"details" in agentEvent.result &&
+					isSubAgentToolDetails((agentEvent.result as { details?: unknown }).details)
+				) {
+					mergeSubAgentUsage(
+						this.runState.totalUsage,
+						(agentEvent.result as { details: SubAgentToolDetails }).details,
+					);
 				}
 
 				if (agentEvent.isError) {
