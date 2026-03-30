@@ -333,10 +333,10 @@ name: reviewer
 description: Review code changes for correctness, regressions, and missing tests
 model: anthropic/claude-sonnet-4-5
 tools: read,bash
-maxTurns: 4
-maxToolCalls: 12
-maxWallTimeSec: 180
-bashTimeoutSec: 45
+maxTurns: 24
+maxToolCalls: 48
+maxWallTimeSec: 300
+bashTimeoutSec: 120
 ---
 
 You are a focused code reviewer.

@@ -262,13 +262,6 @@ export function createSubAgentTool(
 				},
 				convertToLlm,
 				getApiKey: async () => apiKey,
-				beforeToolCall: async (_context) => {
-					if (toolCalls >= config.maxToolCalls) {
-						failureReason = `Tool call budget exceeded (${config.maxToolCalls})`;
-						return { block: true, reason: failureReason };
-					}
-					return undefined;
-				},
 			});
 
 			const childController = new AbortController();
@@ -298,6 +291,11 @@ export function createSubAgentTool(
 					toolCalls++;
 					const label = extractLabelFromArgs(event.args) || event.toolName;
 					emitUpdate(formatStatus(config.name, label));
+					if (toolCalls > config.maxToolCalls) {
+						failureReason = `Tool call budget exceeded (${config.maxToolCalls})`;
+						emitUpdate(formatStatus(config.name, "tool budget reached"));
+						worker.abort();
+					}
 				}
 
 				if (

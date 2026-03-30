@@ -91,10 +91,10 @@ Pipiclaw Sub-Agent Phase 1 修改方案
   description: Review code changes for correctness, regressions, and missing tests
   model: claude-sonnet-4-20250514
   tools: read,bash
-  maxTurns: 4
-  maxToolCalls: 12
-  maxWallTimeSec: 180
-  bashTimeoutSec: 45
+  maxTurns: 24
+  maxToolCalls: 48
+  maxWallTimeSec: 300
+  bashTimeoutSec: 120
   ---
 
   You are a focused code reviewer.
@@ -117,10 +117,10 @@ Pipiclaw Sub-Agent Phase 1 修改方案
   默认值：
 
   - `tools`: `read,bash`
-  - `maxTurns`: `4`
-  - `maxToolCalls`: `12`
-  - `maxWallTimeSec`: `180`
-  - `bashTimeoutSec`: `45`
+  - `maxTurns`: `24`
+  - `maxToolCalls`: `48`
+  - `maxWallTimeSec`: `300`
+  - `bashTimeoutSec`: `120`
 
   这些默认值的设计目标：
 

@@ -7,10 +7,10 @@ import { SUB_AGENTS_DIR_NAME } from "./paths.js";
 
 const ALLOWED_SUB_AGENT_TOOLS = ["read", "bash", "edit", "write"] as const;
 const DEFAULT_SUB_AGENT_TOOLS = ["read", "bash"] as const;
-const DEFAULT_MAX_TURNS = 4;
-const DEFAULT_MAX_TOOL_CALLS = 12;
-const DEFAULT_MAX_WALL_TIME_SEC = 180;
-const DEFAULT_BASH_TIMEOUT_SEC = 45;
+const DEFAULT_MAX_TURNS = 24;
+const DEFAULT_MAX_TOOL_CALLS = 48;
+const DEFAULT_MAX_WALL_TIME_SEC = 300;
+const DEFAULT_BASH_TIMEOUT_SEC = 120;
 
 export type SubAgentToolName = (typeof ALLOWED_SUB_AGENT_TOOLS)[number];
 
