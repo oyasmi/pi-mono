@@ -10,7 +10,7 @@ import {
 	type Skill,
 } from "@mariozechner/pi-coding-agent";
 import { mkdir, writeFile } from "fs/promises";
-import { join } from "path";
+import { dirname, join, resolve } from "path";
 import { COMMAND_RESULT_CUSTOM_TYPE, createCommandExtension } from "./command-extension.js";
 import { type BuiltInCommand, renderBuiltInHelp } from "./commands.js";
 import { getAgentConfig, getApiKeyForModel, getSoul, loadPipiclawSkills } from "./config-loader.js";
@@ -213,8 +213,8 @@ class ChannelRunner implements AgentRunner {
 		this.channelDir = channelDir;
 
 		const executor = createExecutor(sandboxConfig);
-		this.workspacePath = executor.getWorkspacePath(channelDir.replace(`/${channelId}`, ""));
-		this.workspaceDir = join(channelDir, "..");
+		this.workspaceDir = resolve(dirname(channelDir));
+		this.workspacePath = executor.getWorkspacePath(this.workspaceDir);
 
 		// Create tools
 		const tools = createPipiclawTools(executor);
