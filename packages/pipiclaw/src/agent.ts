@@ -38,6 +38,10 @@ export interface AgentRunner {
 }
 
 type FinalOutcome = { kind: "none" } | { kind: "silent" } | { kind: "final"; text: string };
+type ModelRegistryClass = {
+	create?: (authStorage: AuthStorage, modelsJsonPath?: string) => ModelRegistry;
+	new (authStorage: AuthStorage, modelsJsonPath?: string): ModelRegistry;
+};
 
 function isSilentOutcome(outcome: FinalOutcome): outcome is { kind: "silent" } {
 	return outcome.kind === "silent";
@@ -49,6 +53,13 @@ function isFinalOutcome(outcome: FinalOutcome): outcome is { kind: "final"; text
 
 function getFinalOutcomeText(outcome: FinalOutcome): string | null {
 	return isFinalOutcome(outcome) ? outcome.text : null;
+}
+
+function createModelRegistry(authStorage: AuthStorage, modelsJsonPath: string): ModelRegistry {
+	const registryClass = ModelRegistry as unknown as ModelRegistryClass;
+	return typeof registryClass.create === "function"
+		? registryClass.create(authStorage, modelsJsonPath)
+		: new registryClass(authStorage, modelsJsonPath);
 }
 
 // ============================================================================
@@ -230,7 +241,7 @@ class ChannelRunner implements AgentRunner {
 
 		// Create AuthStorage and ModelRegistry
 		const authStorage = AuthStorage.create(AUTH_CONFIG_PATH);
-		this.modelRegistry = ModelRegistry.create(authStorage, MODELS_CONFIG_PATH);
+		this.modelRegistry = createModelRegistry(authStorage, MODELS_CONFIG_PATH);
 
 		// Resolve model: prefer saved global default, fall back to first available model
 		this.activeModel = resolveInitialModel(this.modelRegistry, this.settingsManager);
