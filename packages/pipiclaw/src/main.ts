@@ -22,7 +22,6 @@ import {
 	CHANNEL_CONFIG_PATH,
 	MODELS_CONFIG_PATH,
 	SETTINGS_CONFIG_PATH,
-	SUB_AGENTS_DIR,
 	WORKSPACE_DIR,
 } from "./paths.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
@@ -434,13 +433,6 @@ const handler: DingTalkHandler = {
 };
 
 log.logStartup(WORKSPACE_DIR, sandbox.type === "host" ? "host" : `docker:${sandbox.container}`);
-
-if (!existsSync(WORKSPACE_DIR)) {
-	mkdirSync(WORKSPACE_DIR, { recursive: true });
-}
-if (!existsSync(SUB_AGENTS_DIR)) {
-	mkdirSync(SUB_AGENTS_DIR, { recursive: true });
-}
 
 const bot = new DingTalkBot(handler, dingtalkConfig);
 const eventsWatcher = createEventsWatcher(WORKSPACE_DIR, bot);

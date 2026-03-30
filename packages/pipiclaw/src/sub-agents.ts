@@ -11,6 +11,8 @@ const DEFAULT_MAX_TURNS = 24;
 const DEFAULT_MAX_TOOL_CALLS = 48;
 const DEFAULT_MAX_WALL_TIME_SEC = 300;
 const DEFAULT_BASH_TIMEOUT_SEC = 120;
+const MAX_SUB_AGENT_TASK_CHARS = 12000;
+const MAX_INLINE_SYSTEM_PROMPT_CHARS = 16000;
 
 export type SubAgentToolName = (typeof ALLOWED_SUB_AGENT_TOOLS)[number];
 
@@ -45,6 +47,17 @@ export interface SubAgentInvocationOverrides {
 	maxToolCalls?: number;
 	maxWallTimeSec?: number;
 	bashTimeoutSec?: number;
+}
+
+function validateTextLength(value: string, maxChars: number, label: string): string | undefined {
+	if (value.length <= maxChars) {
+		return undefined;
+	}
+	return `${label} exceeds ${maxChars} characters (got ${value.length}).`;
+}
+
+export function validateSubAgentTask(task: string): string | undefined {
+	return validateTextLength(task, MAX_SUB_AGENT_TASK_CHARS, "Sub-agent task");
 }
 
 export function getSubAgentsDir(workspaceDir: string): string {
@@ -266,6 +279,16 @@ export function resolveSubAgentConfig(
 	const systemPrompt = overrides.systemPrompt?.trim() || baseConfig?.systemPrompt || "";
 	if (!systemPrompt) {
 		return { error: "Sub-agent system prompt cannot be empty." };
+	}
+	if (overrides.systemPrompt?.trim()) {
+		const promptLengthError = validateTextLength(
+			overrides.systemPrompt.trim(),
+			MAX_INLINE_SYSTEM_PROMPT_CHARS,
+			"Inline sub-agent systemPrompt",
+		);
+		if (promptLengthError) {
+			return { error: promptLengthError };
+		}
 	}
 
 	return {

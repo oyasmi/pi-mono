@@ -4,7 +4,13 @@ import { convertToLlm } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { formatModelReference } from "../model-utils.js";
 import type { Executor } from "../sandbox.js";
-import { discoverSubAgents, formatSubAgentList, resolveSubAgentConfig, type SubAgentConfig } from "../sub-agents.js";
+import {
+	discoverSubAgents,
+	formatSubAgentList,
+	resolveSubAgentConfig,
+	type SubAgentConfig,
+	validateSubAgentTask,
+} from "../sub-agents.js";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { createReadTool } from "./read.js";
@@ -191,37 +197,15 @@ export function createSubAgentTool(
 			const availableModels = options.getAvailableModels();
 			const discovery = discoverSubAgents(options.workspaceDir, availableModels);
 			const currentModel = options.getCurrentModel();
+			const taskLengthError = validateSubAgentTask(params.task);
+			if (taskLengthError) {
+				throw new Error(taskLengthError);
+			}
 			const invocation = resolveSubAgentConfig(availableModels, currentModel, discovery.agents, params);
 			if (!invocation.config) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `${invocation.error}\n\nAvailable predefined sub-agents:\n${formatSubAgentList(discovery.agents)}`,
-						},
-					],
-					details: createDetails(
-						{
-							name: params.name?.trim() || params.agent || "dynamic-subagent",
-							description: "Invalid sub-agent invocation",
-							systemPrompt: params.systemPrompt?.trim() || "",
-							tools: ["read", "bash"],
-							model: currentModel,
-							modelRef: formatModelReference(currentModel),
-							maxTurns: 0,
-							maxToolCalls: 0,
-							maxWallTimeSec: 0,
-							bashTimeoutSec: 0,
-							source: params.agent ? "predefined" : "inline",
-						},
-						createEmptyUsageTotals(),
-						0,
-						0,
-						0,
-						true,
-						invocation.error,
-					),
-				};
+				throw new Error(
+					`${invocation.error}\n\nAvailable predefined sub-agents:\n${formatSubAgentList(discovery.agents)}`,
+				);
 			}
 
 			const config = invocation.config;
@@ -339,10 +323,8 @@ export function createSubAgentTool(
 			const durationMs = Date.now() - startedAt;
 			if (!lastAssistantMessage) {
 				failureReason = failureReason || "Sub-agent returned no assistant message";
-				return {
-					content: [{ type: "text", text: `Sub-agent ${config.name} failed: ${failureReason}` }],
-					details: createDetails(config, usage, assistantTurns, toolCalls, durationMs, true, failureReason),
-				};
+				emitUpdate(formatStatus(config.name, "failed"));
+				throw new Error(`Sub-agent ${config.name} failed: ${failureReason}`);
 			}
 
 			const finalText = extractAssistantText(lastAssistantMessage);
@@ -353,18 +335,8 @@ export function createSubAgentTool(
 					: undefined);
 
 			if (effectiveFailureReason) {
-				return {
-					content: [{ type: "text", text: buildFailureText(config, effectiveFailureReason, finalText) }],
-					details: createDetails(
-						config,
-						usage,
-						assistantTurns,
-						toolCalls,
-						durationMs,
-						true,
-						effectiveFailureReason,
-					),
-				};
+				emitUpdate(formatStatus(config.name, "failed"));
+				throw new Error(buildFailureText(config, effectiveFailureReason, finalText));
 			}
 
 			return {
