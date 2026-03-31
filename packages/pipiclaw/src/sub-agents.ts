@@ -74,17 +74,42 @@ export function getSubAgentsDir(workspaceDir: string): string {
 	return join(workspaceDir, SUB_AGENTS_DIR_NAME);
 }
 
-function parseToolNames(raw: string | undefined): { tools: SubAgentToolName[]; error?: string } {
-	if (!raw || !raw.trim()) {
+function readOptionalTrimmedString(value: unknown): string | undefined {
+	if (typeof value !== "string") {
+		return undefined;
+	}
+
+	const trimmed = value.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+function parseToolNames(raw: unknown): { tools: SubAgentToolName[]; error?: string } {
+	if (raw === undefined || raw === null) {
 		return { tools: [...DEFAULT_SUB_AGENT_TOOLS] };
 	}
 
-	const values = raw
-		.split(",")
-		.map((value) => value.trim())
-		.filter((value) => value.length > 0);
+	if (typeof raw === "string") {
+		if (!raw.trim()) {
+			return { tools: [...DEFAULT_SUB_AGENT_TOOLS] };
+		}
 
-	return validateToolNames(values);
+		const values = raw
+			.split(",")
+			.map((value) => value.trim())
+			.filter((value) => value.length > 0);
+
+		return validateToolNames(values);
+	}
+
+	if (Array.isArray(raw)) {
+		const invalidValue = raw.find((value) => typeof value !== "string");
+		if (invalidValue !== undefined) {
+			return { tools: [], error: 'Invalid "tools" frontmatter: expected a string or string[]' };
+		}
+		return validateToolNames(raw);
+	}
+
+	return { tools: [], error: 'Invalid "tools" frontmatter: expected a string or string[]' };
 }
 
 export function validateToolNames(values: string[] | undefined): { tools: SubAgentToolName[]; error?: string } {
@@ -112,8 +137,23 @@ export function validateToolNames(values: string[] | undefined): { tools: SubAge
 	return { tools: tools.length > 0 ? tools : [...DEFAULT_SUB_AGENT_TOOLS] };
 }
 
-function parsePositiveInteger(raw: string | undefined, fallback: number): { value: number; warning?: string } {
-	if (!raw || !raw.trim()) {
+function parsePositiveInteger(raw: unknown, fallback: number): { value: number; warning?: string } {
+	if (raw === undefined || raw === null) {
+		return { value: fallback };
+	}
+
+	if (typeof raw === "number") {
+		if (!Number.isFinite(raw) || raw <= 0) {
+			return { value: fallback, warning: `Invalid numeric value "${String(raw)}", using default ${fallback}` };
+		}
+		return { value: Math.floor(raw) };
+	}
+
+	if (typeof raw !== "string") {
+		return { value: fallback, warning: `Invalid numeric value "${String(raw)}", using default ${fallback}` };
+	}
+
+	if (!raw.trim()) {
 		return { value: fallback };
 	}
 
@@ -180,9 +220,9 @@ export function discoverSubAgents(workspaceDir: string, availableModels: Model<A
 			continue;
 		}
 
-		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
-		const name = frontmatter.name?.trim();
-		const description = frontmatter.description?.trim();
+		const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content);
+		const name = readOptionalTrimmedString(frontmatter.name);
+		const description = readOptionalTrimmedString(frontmatter.description);
 
 		if (!name || !description) {
 			warnings.push(`${entry.name}: missing required frontmatter fields "name" or "description"`);
@@ -211,7 +251,7 @@ export function discoverSubAgents(workspaceDir: string, availableModels: Model<A
 			}
 		}
 
-		const modelRef = frontmatter.model?.trim();
+		const modelRef = readOptionalTrimmedString(frontmatter.model);
 		let model: Model<Api> | undefined;
 		if (modelRef) {
 			const resolved = resolveModelReference(modelRef, availableModels);

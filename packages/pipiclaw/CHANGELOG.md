@@ -42,3 +42,4 @@
 - Workspace `SOUL.md` now appends to the default pi system prompt instead of replacing the pi base prompt
 - Channel directories now create `MEMORY.md` and `HISTORY.md` immediately when the channel state is initialized
 - Workspace and channel memory templates are now structured around stable shared context instead of placeholder comments only
+- Sub-agent frontmatter parsing now accepts native YAML arrays and numeric values instead of assuming every field is a string

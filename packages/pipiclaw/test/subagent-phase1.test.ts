@@ -108,6 +108,43 @@ ${"x".repeat(16001)}`,
 		expect(discovery.warnings[0]).toContain("exceeds 16000 characters");
 	});
 
+	it("accepts YAML frontmatter arrays and numeric values", () => {
+		const workspaceDir = createTempWorkspace();
+		const subAgentsDir = getSubAgentsDir(workspaceDir);
+		mkdirSync(subAgentsDir, { recursive: true });
+
+		writeFileSync(
+			join(subAgentsDir, "reviewer.md"),
+			`---
+name: reviewer
+description: review code
+tools:
+  - read
+  - bash
+maxTurns: 7
+maxToolCalls: 9
+maxWallTimeSec: 60
+bashTimeoutSec: 30
+---
+
+Review files carefully.`,
+			"utf-8",
+		);
+
+		const discovery = discoverSubAgents(workspaceDir, [model]);
+		expect(discovery.warnings).toEqual([]);
+		expect(discovery.agents).toHaveLength(1);
+		expect(discovery.agents[0]).toMatchObject({
+			name: "reviewer",
+			description: "review code",
+			tools: ["read", "bash"],
+			maxTurns: 7,
+			maxToolCalls: 9,
+			maxWallTimeSec: 60,
+			bashTimeoutSec: 30,
+		});
+	});
+
 	it("resolves current model by default and rejects overly long inline prompts", () => {
 		const resolved = resolveSubAgentConfig([model], model, [], {
 			name: "inline-reviewer",
