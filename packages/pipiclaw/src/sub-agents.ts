@@ -1,5 +1,6 @@
 import type { Api, Model } from "@mariozechner/pi-ai";
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import type { Dirent } from "fs";
 import { existsSync, readdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { findExactModelReferenceMatch, formatModelReference } from "./model-utils.js";
@@ -12,7 +13,7 @@ const DEFAULT_MAX_TOOL_CALLS = 48;
 const DEFAULT_MAX_WALL_TIME_SEC = 300;
 const DEFAULT_BASH_TIMEOUT_SEC = 120;
 const MAX_SUB_AGENT_TASK_CHARS = 12000;
-const MAX_INLINE_SYSTEM_PROMPT_CHARS = 16000;
+const MAX_SUB_AGENT_SYSTEM_PROMPT_CHARS = 16000;
 
 export type SubAgentToolName = (typeof ALLOWED_SUB_AGENT_TOOLS)[number];
 
@@ -29,6 +30,11 @@ export interface SubAgentConfig {
 	bashTimeoutSec: number;
 	filePath?: string;
 	source: "predefined" | "inline";
+}
+
+export interface ResolvedSubAgentConfig extends Omit<SubAgentConfig, "model" | "modelRef"> {
+	model: Model<Api>;
+	modelRef: string;
 }
 
 export interface SubAgentDiscoveryResult {
@@ -58,6 +64,10 @@ function validateTextLength(value: string, maxChars: number, label: string): str
 
 export function validateSubAgentTask(task: string): string | undefined {
 	return validateTextLength(task, MAX_SUB_AGENT_TASK_CHARS, "Sub-agent task");
+}
+
+function validateSubAgentSystemPrompt(systemPrompt: string, label: string): string | undefined {
+	return validateTextLength(systemPrompt, MAX_SUB_AGENT_SYSTEM_PROMPT_CHARS, label);
 }
 
 export function getSubAgentsDir(workspaceDir: string): string {
@@ -145,9 +155,18 @@ export function discoverSubAgents(workspaceDir: string, availableModels: Model<A
 	const warnings: string[] = [];
 	const agents: SubAgentConfig[] = [];
 	const seenNames = new Set<string>();
-	const entries = readdirSync(directory, { withFileTypes: true })
-		.filter((entry) => entry.name.endsWith(".md") && (entry.isFile() || entry.isSymbolicLink()))
-		.sort((a, b) => a.name.localeCompare(b.name));
+	let entries: Dirent<string>[];
+	try {
+		entries = readdirSync(directory, { withFileTypes: true })
+			.filter((entry) => entry.name.endsWith(".md") && (entry.isFile() || entry.isSymbolicLink()))
+			.sort((a, b) => a.name.localeCompare(b.name));
+	} catch (error) {
+		return {
+			directory,
+			agents: [],
+			warnings: [`Failed to read sub-agents directory (${error instanceof Error ? error.message : String(error)})`],
+		};
+	}
 
 	for (const entry of entries) {
 		const filePath = join(directory, entry.name);
@@ -203,8 +222,14 @@ export function discoverSubAgents(workspaceDir: string, availableModels: Model<A
 			model = resolved.model;
 		}
 
-		if (!body.trim()) {
+		const trimmedBody = body.trim();
+		if (!trimmedBody) {
 			warnings.push(`${entry.name}: empty system prompt body`);
+			continue;
+		}
+		const promptLengthError = validateSubAgentSystemPrompt(trimmedBody, "Sub-agent system prompt");
+		if (promptLengthError) {
+			warnings.push(`${entry.name}: ${promptLengthError}`);
 			continue;
 		}
 
@@ -212,7 +237,7 @@ export function discoverSubAgents(workspaceDir: string, availableModels: Model<A
 		agents.push({
 			name,
 			description,
-			systemPrompt: body,
+			systemPrompt: trimmedBody,
 			tools: toolParse.tools,
 			model,
 			modelRef: modelRef || (model ? formatModelReference(model) : undefined),
@@ -233,7 +258,7 @@ export function resolveSubAgentConfig(
 	currentModel: Model<Api>,
 	predefinedAgents: SubAgentConfig[],
 	overrides: SubAgentInvocationOverrides,
-): { config?: SubAgentConfig; error?: string } {
+): { config?: ResolvedSubAgentConfig; error?: string } {
 	const baseConfig = overrides.agent ? predefinedAgents.find((agent) => agent.name === overrides.agent) : undefined;
 	if (overrides.agent && !baseConfig) {
 		const available = predefinedAgents.length > 0 ? predefinedAgents.map((agent) => agent.name).join(", ") : "none";
@@ -281,9 +306,8 @@ export function resolveSubAgentConfig(
 		return { error: "Sub-agent system prompt cannot be empty." };
 	}
 	if (overrides.systemPrompt?.trim()) {
-		const promptLengthError = validateTextLength(
+		const promptLengthError = validateSubAgentSystemPrompt(
 			overrides.systemPrompt.trim(),
-			MAX_INLINE_SYSTEM_PROMPT_CHARS,
 			"Inline sub-agent systemPrompt",
 		);
 		if (promptLengthError) {

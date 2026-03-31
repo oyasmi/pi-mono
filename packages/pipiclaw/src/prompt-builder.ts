@@ -151,6 +151,7 @@ Do not use sub-agents when:
 
 Important rules:
 - Sub-agents cannot see your conversation history unless you include the needed context in \`task\`
+- The runtime injects a small fixed execution context (workspace path, channel id, sandbox), but you must still include task-specific context yourself
 - Sub-agents do not receive the \`subagent\` tool, so they cannot create nested agents
 - Prefer predefined sub-agents when one clearly fits
 - Use temporary inline sub-agents only when that extra flexibility is genuinely useful`);

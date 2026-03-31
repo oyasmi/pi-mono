@@ -225,6 +225,7 @@ Pipiclaw 同时支持：
 | `.channel-meta.json` | 不支持 | `<channel>/.channel-meta.json` | 运行时自动维护，用于主动发送和重启恢复，不建议手工编辑。 |
 | `context.jsonl` | 不支持 | `<channel>/context.jsonl` | 原始 session 存储，冷文件，不主动加载或扫描。 |
 | `log.jsonl` | 不支持 | `<channel>/log.jsonl` | 原始消息存储，冷文件，不主动加载或扫描。 |
+| `subagent-runs.jsonl` | 不支持 | `<channel>/subagent-runs.jsonl` | sub-agent 运行摘要日志。记录其输出摘要、预算停止原因和 usage，便于事后审查。 |
 
 ### File Intent
 
@@ -351,7 +352,11 @@ Keep findings concise and actionable.
 - `model` 可省略；省略时默认使用主 Agent 当前模型
 - `tools` 可省略；省略时默认使用 `read,bash`
 - 各预算字段都可省略；省略时会使用 runtime 默认值
+- 默认预算值的设计目标是优先防止失控和成本失真，而不是追求“一个 sub-agent 包办整件大任务”；如果任务明显更重，应该显式调大预算
 - sub-agent 不会拿到 `subagent` 工具，因此不能再创建孙 agent
+- sub-agent 只隔离 LLM 对话上下文，不隔离文件系统和 executor；它读写的 workspace 文件对主 Agent 后续同样可见
+- runtime 会自动给 sub-agent 注入一小段固定运行上下文，例如 workspace 根目录、channel id 和 sandbox 类型；主 Agent 仍然需要把任务本身所需的业务上下文写进 `task`
+- 如果 sub-agent 已经产出可用结果，但因预算耗尽或中途停止未完整完成，runtime 会保留这部分结果返回给主 Agent，并在 channel 目录的 `subagent-runs.jsonl` 中记录执行摘要
 
 ### 使用建议
 

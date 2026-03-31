@@ -23,7 +23,7 @@ import { APP_HOME_DIR, AUTH_CONFIG_PATH, MODELS_CONFIG_PATH } from "./paths.js";
 import { buildAppendSystemPrompt } from "./prompt-builder.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelStore } from "./store.js";
-import { discoverSubAgents, formatSubAgentList } from "./sub-agents.js";
+import { discoverSubAgents, formatSubAgentList, type SubAgentDiscoveryResult } from "./sub-agents.js";
 import { createPipiclawTools } from "./tools/index.js";
 import type { SubAgentToolDetails } from "./tools/subagent.js";
 
@@ -124,7 +124,11 @@ function extractToolResultText(result: unknown): string {
 }
 
 function isSubAgentToolDetails(value: unknown): value is SubAgentToolDetails {
-	if (!value || typeof value !== "object" || !("usage" in value)) {
+	if (!value || typeof value !== "object" || !("kind" in value) || (value as { kind?: unknown }).kind !== "subagent") {
+		return false;
+	}
+
+	if (!("usage" in value)) {
 		return false;
 	}
 
@@ -194,6 +198,7 @@ interface RunQueue {
 interface RunState {
 	ctx: DingTalkContext | null;
 	logCtx: { channelId: string; userName?: string; channelName?: string } | null;
+	store: ChannelStore | null;
 	queue: RunQueue | null;
 	pendingTools: Map<string, PendingTool>;
 	totalUsage: UsageTotals;
@@ -207,6 +212,7 @@ function createEmptyRunState(): RunState {
 	return {
 		ctx: null,
 		logCtx: null,
+		store: null,
 		queue: null,
 		pendingTools: new Map(),
 		totalUsage: {
@@ -241,6 +247,7 @@ class ChannelRunner implements AgentRunner {
 	private readonly modelRegistry: ModelRegistry;
 	private readonly memoryLifecycle: MemoryLifecycle;
 	private readonly sessionReady: Promise<void>;
+	private subAgentDiscovery: SubAgentDiscoveryResult;
 
 	// --- Mutable across runs ---
 	private activeModel: Model<Api>;
@@ -274,6 +281,7 @@ class ChannelRunner implements AgentRunner {
 		// Resolve model: prefer saved global default, fall back to first available model
 		this.activeModel = resolveInitialModel(this.modelRegistry, this.settingsManager);
 		log.logInfo(`Using model: ${this.activeModel.provider}/${this.activeModel.id} (${this.activeModel.name})`);
+		this.subAgentDiscovery = this.refreshSubAgentDiscovery();
 
 		// Create tools
 		const tools = createPipiclawTools({
@@ -282,6 +290,10 @@ class ChannelRunner implements AgentRunner {
 			getAvailableModels: () => this.modelRegistry.getAvailable(),
 			resolveApiKey: async (model) => getApiKeyForModel(this.modelRegistry, model),
 			workspaceDir: this.workspaceDir,
+			workspacePath: this.workspacePath,
+			channelId: this.channelId,
+			sandboxConfig: this.sandboxConfig,
+			getSubAgentDiscovery: () => this.subAgentDiscovery,
 		});
 
 		// Create agent
@@ -334,10 +346,9 @@ class ChannelRunner implements AgentRunner {
 				if (soul) {
 					sections.unshift(soul);
 				}
-				const subAgents = discoverSubAgents(this.workspaceDir, this.modelRegistry.getAvailable());
 				sections.push(
 					buildAppendSystemPrompt(this.workspacePath, this.channelId, this.sandboxConfig, {
-						subAgentList: formatSubAgentList(subAgents.agents),
+						subAgentList: formatSubAgentList(this.subAgentDiscovery.agents),
 					}),
 				);
 				return sections;
@@ -374,8 +385,8 @@ class ChannelRunner implements AgentRunner {
 
 	// === Public API ===
 
-	async run(ctx: DingTalkContext, _store: ChannelStore): Promise<{ stopReason: string; errorMessage?: string }> {
-		this.resetRunState(ctx);
+	async run(ctx: DingTalkContext, store: ChannelStore): Promise<{ stopReason: string; errorMessage?: string }> {
+		this.resetRunState(ctx, store);
 
 		// Create queue for this run
 		let queueChain = Promise.resolve();
@@ -575,7 +586,7 @@ class ChannelRunner implements AgentRunner {
 		});
 	}
 
-	private resetRunState(ctx: DingTalkContext): void {
+	private resetRunState(ctx: DingTalkContext, store: ChannelStore): void {
 		this.runState = createEmptyRunState();
 		this.runState.ctx = ctx;
 		this.runState.logCtx = {
@@ -583,23 +594,35 @@ class ChannelRunner implements AgentRunner {
 			userName: ctx.message.userName,
 			channelName: ctx.channelName,
 		};
+		this.runState.store = store;
 	}
 
 	private async refreshSessionResources(): Promise<void> {
 		await this.ensureSessionReady();
 		const skills = loadPipiclawSkills(this.channelDir, this.workspacePath);
 		this.currentSkills = skills;
+		this.subAgentDiscovery = this.refreshSubAgentDiscovery();
 		await this.session.reload();
 	}
 
 	private async initializeSession(): Promise<void> {
 		const skills = loadPipiclawSkills(this.channelDir, this.workspacePath);
 		this.currentSkills = skills;
+		this.subAgentDiscovery = this.refreshSubAgentDiscovery();
 		await this.session.reload();
 	}
 
 	private async ensureSessionReady(): Promise<void> {
 		await this.sessionReady;
+	}
+
+	private refreshSubAgentDiscovery(): SubAgentDiscoveryResult {
+		this.modelRegistry.refresh();
+		const discovery = discoverSubAgents(this.workspaceDir, this.modelRegistry.getAvailable());
+		for (const warning of discovery.warnings) {
+			log.logWarning(`Sub-agent config warning (${this.channelId})`, warning);
+		}
+		return discovery;
 	}
 
 	// === Session event subscription ===
@@ -608,7 +631,7 @@ class ChannelRunner implements AgentRunner {
 		this.session.subscribe(async (event: any) => {
 			if (!this.runState.ctx || !this.runState.logCtx || !this.runState.queue) return;
 
-			const { ctx, logCtx, queue, pendingTools } = this.runState;
+			const { ctx, logCtx, queue, pendingTools, store } = this.runState;
 
 			if (event.type === "tool_execution_start") {
 				const agentEvent = event as any & { type: "tool_execution_start" };
@@ -640,27 +663,58 @@ class ChannelRunner implements AgentRunner {
 				pendingTools.delete(agentEvent.toolCallId);
 
 				const durationMs = pending ? Date.now() - pending.startTime : 0;
-
-				if (agentEvent.isError) {
-					log.logToolError(logCtx, agentEvent.toolName, durationMs, resultStr);
-				} else {
-					log.logToolSuccess(logCtx, agentEvent.toolName, durationMs, resultStr);
-				}
-
-				if (
+				const subAgentDetails =
 					agentEvent.toolName === "subagent" &&
 					agentEvent.result &&
 					typeof agentEvent.result === "object" &&
 					"details" in agentEvent.result &&
 					isSubAgentToolDetails((agentEvent.result as { details?: unknown }).details)
-				) {
-					mergeSubAgentUsage(
-						this.runState.totalUsage,
-						(agentEvent.result as { details: SubAgentToolDetails }).details,
+						? (agentEvent.result as { details: SubAgentToolDetails }).details
+						: null;
+
+				if (subAgentDetails) {
+					mergeSubAgentUsage(this.runState.totalUsage, subAgentDetails);
+					const label =
+						pending?.args &&
+						typeof pending.args === "object" &&
+						"label" in pending.args &&
+						typeof (pending.args as { label?: unknown }).label === "string"
+							? ((pending.args as { label: string }).label ?? "subagent").trim()
+							: "subagent";
+					queue.enqueue(
+						() =>
+							store?.logSubAgentRun(logCtx.channelId, {
+								date: new Date().toISOString(),
+								toolCallId: agentEvent.toolCallId,
+								label,
+								agent: subAgentDetails.agent,
+								source: subAgentDetails.source,
+								model: subAgentDetails.model,
+								tools: [...subAgentDetails.tools],
+								turns: subAgentDetails.turns,
+								toolCalls: subAgentDetails.toolCalls,
+								durationMs: subAgentDetails.durationMs,
+								failed: subAgentDetails.failed,
+								failureReason: subAgentDetails.failureReason,
+								output: resultStr.length > 16000 ? resultStr.slice(0, 16000) : resultStr,
+								outputTruncated: resultStr.length > 16000,
+								usage: {
+									...subAgentDetails.usage,
+									cost: { ...subAgentDetails.usage.cost },
+								},
+							}) ?? Promise.resolve(),
+						"sub-agent run log",
 					);
 				}
 
-				if (agentEvent.isError) {
+				const treatAsError = agentEvent.isError || Boolean(subAgentDetails?.failed);
+				if (treatAsError) {
+					log.logToolError(logCtx, agentEvent.toolName, durationMs, resultStr);
+				} else {
+					log.logToolSuccess(logCtx, agentEvent.toolName, durationMs, resultStr);
+				}
+
+				if (treatAsError) {
 					queue.enqueue(
 						() => ctx.respond(formatProgressEntry("error", truncate(resultStr, 200)), false),
 						"tool error",

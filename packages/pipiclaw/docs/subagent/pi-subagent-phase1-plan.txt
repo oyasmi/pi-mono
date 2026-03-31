@@ -73,6 +73,8 @@ Pipiclaw Sub-Agent Phase 1 修改方案
   - 主 Agent 可以读取并调用其中定义的 sub-agent
   - 主 Agent 也可以在一次具体任务里临时构造一个内联 sub-agent
   - `sub-agents/` 不属于 channel runtime 数据
+  - sub-agent 只隔离 LLM 对话上下文，不隔离文件系统和 executor
+  - sub-agent 在 workspace 中写出的文件，主 Agent 后续可以读取到；这是 Phase 1 的有意设计
 
 ---
 
@@ -125,8 +127,9 @@ Pipiclaw Sub-Agent Phase 1 修改方案
   这些默认值的设计目标：
 
   1. 让 sub-agent 默认偏短任务
-  2. 控制 DingTalk 场景下的成本和卡死风险
+  2. 优先控制 DingTalk 场景下的成本、失控和卡死风险
   3. 不要求每个定义都显式写预算
+  4. 当任务明显更重时，允许在定义文件或单次调用中显式调大预算
 
 ---
 
@@ -326,9 +329,11 @@ Pipiclaw Sub-Agent Phase 1 修改方案
   执行结果原则：
 
   1. 成功时返回最终文本
-  2. 错误时返回 `isError: true`
-  3. 返回文本要简洁，不把完整 event dump 暴露给主 Agent
-  4. 细节放到 `details`
+  2. 完全失败时返回 tool error
+  3. 若 sub-agent 已产生可用文本但因预算耗尽或中途停止而未完整完成，则返回部分结果，不丢弃已产出文本
+  4. 返回文本要简洁，不把完整 event dump 暴露给主 Agent
+  5. 细节放到 `details`
+  6. sub-agent 运行摘要应持久化到 channel 目录，便于事后审查
 
 ---
 
@@ -418,6 +423,11 @@ Pipiclaw Sub-Agent Phase 1 修改方案
   - `Subagent reviewer: preparing final summary`
 
   update 不需要追求逐 token streaming，Phase 1 只要做到“用户可见仍在推进”即可。
+
+  另外补充：
+
+  - runtime 会把 sub-agent 的执行摘要写入 `<channel>/subagent-runs.jsonl`
+  - 至少包括 agent 名称、预算停止原因、usage、输出摘要
 
 ---
 

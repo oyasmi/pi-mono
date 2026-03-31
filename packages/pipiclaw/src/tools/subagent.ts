@@ -5,10 +5,11 @@ import { Type } from "@sinclair/typebox";
 import { formatModelReference } from "../model-utils.js";
 import type { Executor } from "../sandbox.js";
 import {
-	discoverSubAgents,
 	formatSubAgentList,
+	type ResolvedSubAgentConfig,
 	resolveSubAgentConfig,
 	type SubAgentConfig,
+	type SubAgentDiscoveryResult,
 	validateSubAgentTask,
 } from "../sub-agents.js";
 import { createBashTool } from "./bash.js";
@@ -56,6 +57,7 @@ interface UsageTotals {
 }
 
 export interface SubAgentToolDetails {
+	kind: "subagent";
 	agent: string;
 	source: "predefined" | "inline";
 	model: string;
@@ -74,6 +76,25 @@ export interface SubAgentToolOptions {
 	getAvailableModels: () => Model<Api>[];
 	resolveApiKey: (model: Model<Api>) => Promise<string>;
 	workspaceDir: string;
+	getSubAgentDiscovery?: () => SubAgentDiscoveryResult;
+	runtimeContext: {
+		workspacePath: string;
+		channelId: string;
+		sandbox: string;
+	};
+	createWorker?: (config: {
+		subAgent: ResolvedSubAgentConfig;
+		apiKey: string;
+		tools: AgentTool<any>[];
+	}) => SubAgentWorker;
+}
+
+interface SubAgentWorker {
+	state: { messages: AgentMessage[] };
+	subscribe(listener: (event: AgentEvent) => void): () => void;
+	abort(): void;
+	prompt(input: string): Promise<void>;
+	waitForIdle(): Promise<void>;
 }
 
 function createEmptyUsageTotals(): UsageTotals {
@@ -129,6 +150,14 @@ function buildFailureText(config: SubAgentConfig, reason: string, lastAssistantT
 	return `Sub-agent ${config.name} failed: ${reason}\n\nLast output:\n${trimmedLastText}`;
 }
 
+function buildStoppedText(config: SubAgentConfig, reason: string, finalText: string): string {
+	const trimmedFinalText = finalText.trim();
+	if (!trimmedFinalText) {
+		return `Sub-agent ${config.name} stopped: ${reason}`;
+	}
+	return `[Sub-agent ${config.name} stopped: ${reason}]\n\n${trimmedFinalText}`;
+}
+
 function createToolSet(executor: Executor, bashTimeoutSec: number): AgentTool<any>[] {
 	return [
 		createReadTool(executor),
@@ -138,13 +167,31 @@ function createToolSet(executor: Executor, bashTimeoutSec: number): AgentTool<an
 	];
 }
 
+function buildSubAgentTask(
+	task: string,
+	config: ResolvedSubAgentConfig,
+	runtimeContext: SubAgentToolOptions["runtimeContext"],
+): string {
+	const taskText = task.trim();
+	return `Runtime context:
+- Workspace root: ${runtimeContext.workspacePath}
+- Channel id: ${runtimeContext.channelId}
+- Channel directory: ${runtimeContext.workspacePath}/${runtimeContext.channelId}
+- Sandbox: ${runtimeContext.sandbox}
+- Filesystem isolation: none (files written here are visible to the parent agent)
+- Your configured role: ${config.name}
+
+Task:
+${taskText}`;
+}
+
 function filterToolsByName(allTools: AgentTool<any>[], names: string[]): AgentTool<any>[] {
 	const allowed = new Set(names);
 	return allTools.filter((tool) => allowed.has(tool.name));
 }
 
 function createDetails(
-	config: SubAgentConfig,
+	config: ResolvedSubAgentConfig,
 	usage: UsageTotals,
 	turns: number,
 	toolCalls: number,
@@ -153,9 +200,10 @@ function createDetails(
 	failureReason?: string,
 ): SubAgentToolDetails {
 	return {
+		kind: "subagent",
 		agent: config.name,
 		source: config.source,
-		model: formatModelReference(config.model!),
+		model: formatModelReference(config.model),
 		tools: [...config.tools],
 		turns,
 		toolCalls,
@@ -195,7 +243,11 @@ export function createSubAgentTool(
 		parameters: subagentSchema,
 		execute: async (_toolCallId, params, signal, onUpdate) => {
 			const availableModels = options.getAvailableModels();
-			const discovery = discoverSubAgents(options.workspaceDir, availableModels);
+			const discovery = options.getSubAgentDiscovery?.() ?? {
+				directory: `${options.workspaceDir}/sub-agents`,
+				agents: [],
+				warnings: [],
+			};
 			const currentModel = options.getCurrentModel();
 			const taskLengthError = validateSubAgentTask(params.task);
 			if (taskLengthError) {
@@ -209,7 +261,7 @@ export function createSubAgentTool(
 			}
 
 			const config = invocation.config;
-			const apiKey = await options.resolveApiKey(config.model!);
+			const apiKey = await options.resolveApiKey(config.model);
 			const startedAt = Date.now();
 			const usage = createEmptyUsageTotals();
 			let assistantTurns = 0;
@@ -237,16 +289,22 @@ export function createSubAgentTool(
 				});
 			};
 
-			const worker = new Agent({
-				initialState: {
-					systemPrompt: config.systemPrompt,
-					model: config.model!,
-					thinkingLevel: "off",
+			const worker =
+				options.createWorker?.({
+					subAgent: config,
+					apiKey,
 					tools: filterToolsByName(createToolSet(options.executor, config.bashTimeoutSec), config.tools),
-				},
-				convertToLlm,
-				getApiKey: async () => apiKey,
-			});
+				}) ??
+				new Agent({
+					initialState: {
+						systemPrompt: config.systemPrompt,
+						model: config.model,
+						thinkingLevel: "off",
+						tools: filterToolsByName(createToolSet(options.executor, config.bashTimeoutSec), config.tools),
+					},
+					convertToLlm,
+					getApiKey: async () => apiKey,
+				});
 
 			const childController = new AbortController();
 			const unlinkAbortSignals = linkAbortSignals(signal, childController);
@@ -304,7 +362,7 @@ export function createSubAgentTool(
 				const abortWorker = () => worker.abort();
 				childController.signal.addEventListener("abort", abortWorker, { once: true });
 				try {
-					await worker.prompt(params.task);
+					await worker.prompt(buildSubAgentTask(params.task, config, options.runtimeContext));
 					await worker.waitForIdle();
 				} finally {
 					childController.signal.removeEventListener("abort", abortWorker);
@@ -335,8 +393,23 @@ export function createSubAgentTool(
 					: undefined);
 
 			if (effectiveFailureReason) {
-				emitUpdate(formatStatus(config.name, "failed"));
-				throw new Error(buildFailureText(config, effectiveFailureReason, finalText));
+				if (!finalText.trim()) {
+					emitUpdate(formatStatus(config.name, "failed"));
+					throw new Error(buildFailureText(config, effectiveFailureReason, finalText));
+				}
+				emitUpdate(formatStatus(config.name, "stopped"));
+				return {
+					content: [{ type: "text", text: buildStoppedText(config, effectiveFailureReason, finalText) }],
+					details: createDetails(
+						config,
+						usage,
+						assistantTurns,
+						toolCalls,
+						durationMs,
+						true,
+						effectiveFailureReason,
+					),
+				};
 			}
 
 			return {

@@ -18,6 +18,37 @@ export interface ChannelStoreConfig {
 	workingDir: string;
 }
 
+export interface LoggedSubAgentRun {
+	date: string;
+	toolCallId: string;
+	label: string;
+	agent: string;
+	source: "predefined" | "inline";
+	model: string;
+	tools: string[];
+	turns: number;
+	toolCalls: number;
+	durationMs: number;
+	failed: boolean;
+	failureReason?: string;
+	output: string;
+	outputTruncated: boolean;
+	usage: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		total: number;
+		cost: {
+			input: number;
+			output: number;
+			cacheRead: number;
+			cacheWrite: number;
+			total: number;
+		};
+	};
+}
+
 export class ChannelStore {
 	private workingDir: string;
 	// Track recently logged message timestamps to prevent duplicates
@@ -72,6 +103,13 @@ export class ChannelStore {
 		const line = `${JSON.stringify(message)}\n`;
 		await appendFile(logPath, line, "utf-8");
 		return true;
+	}
+
+	async logSubAgentRun(channelId: string, run: LoggedSubAgentRun): Promise<void> {
+		const logPath = join(this.getChannelDir(channelId), "subagent-runs.jsonl");
+		this.rotateIfNeeded(logPath);
+		const line = `${JSON.stringify(run)}\n`;
+		await appendFile(logPath, line, "utf-8");
 	}
 
 	/**
